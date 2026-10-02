@@ -180,10 +180,14 @@ class Ui_SignInWindow(object):
 
 
 if __name__ == "__main__":
+    import os
     import sys
-    app = QtWidgets.QApplication(sys.argv)
-    SignInWindow = QtWidgets.QMainWindow()
-    ui = Ui_SignInWindow()
-    ui.setupUi(SignInWindow)
-    SignInWindow.show()
-    sys.exit(app.exec_())
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(root)
+    sys.path.insert(0, root)
+    sys.path.insert(0, os.path.join(root, "Code"))
+
+    from GUIManager import main
+
+    main()

@@ -1,15 +1,6 @@
 from sys import path
 from datetime import datetime as Datetime
 
-##====== while testing ======##
-
-# path.insert(1, '../')
-# from Code.Lending import Lending
-# from Code.Person import Person
-# from Code.Tools import BookState, Tools
-
-##====== while running ======## 
-
 from Lending import Lending
 from Person import Person
 from Tools import BookState, Tools

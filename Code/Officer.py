@@ -2,16 +2,6 @@ from sys import path
 from re import search
 from hashlib import md5
 
-##====== while testing ======##
-
-# path.insert(1, '../')
-# from Code.Tools import BookState
-# from Code.Lending import Lending
-# from Code.Person import Person
-# from Code.Receipt_Bill import Receipt, Bill
-
-##====== while running ======## 
-
 from Tools import BookState
 from Lending import Lending
 from Person import Person

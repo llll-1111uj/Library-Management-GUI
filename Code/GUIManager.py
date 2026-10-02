@@ -1,8 +1,19 @@
+import os
 from re import search
 from time import sleep
 from hashlib import md5
 from typing import Union
 from sys import path, argv, exit
+
+_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_CODE_DIR)
+_DB_PATH = os.path.join(_ROOT_DIR, "Database", "Database.db")
+
+for _p in (_ROOT_DIR, _CODE_DIR):
+    if _p not in path:
+        path.insert(0, _p)
+
+os.chdir(_ROOT_DIR)
 
 from PyQt5.QtCore import Qt
 from sqlite3 import connect
@@ -13,29 +24,13 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QLabel, QTableWidget, QComboBox, QListWidget, QTextBrowser, QListWidgetItem, QMainWindow, \
     QDialog
 
-##====== while testing ======##
-
-# from Code.Lending import Lending
-
-# path.insert(1, '../')
-# from Code.Book import Book
-# from Code.Person import Person
-# from Code.Officer import Officer
-# from Code.Costumer import Costumer
-# from Code.Receipt_Bill import Receipt, Bill
-# from Code.Tools import BookState, Tools, CommandState
-
-##====== while running ======## 
-
 from Lending import Lending
-
 from Book import Book
 from Person import Person
 from Officer import Officer
 from Costumer import Costumer
 from Receipt_Bill import Receipt, Bill
 from Tools import BookState, Tools, CommandState
-path.insert(1, '../')
 
 from GUI.Signin_gui import Ui_SignInWindow
 from GUI.Signup_gui import Ui_SignUpWindow
@@ -102,16 +97,13 @@ class GUI(Ui_SignInWindow):
         self.books = []
         self.requests = {}
 
-        self.officers_costumers["costumer"].append(
-            Costumer("Azar", "Hajipuor", "azarhajipour", "1234", "azarhajipour@Gmail.Com", "09111234567"))
-
-        self.officers_costumers["officer"].append(
-            Officer("Mahdi", "Hajipuor", "mahdihajipour", "4321", "mahdihajipour@gmail.com", "09117654321"))
-
-        self.user = self.officers_costumers["costumer"][0]
-        self.requests[self.user] = []
-
         self.readSqlite()
+        if self.officers_costumers["costumer"]:
+            self.user = self.officers_costumers["costumer"][0]
+            self.requests[self.user] = []
+        else:
+            self.user = None
+
         self.set_logo(self.label_logo, MainWindow)
 
     def open_sign_up(self):
@@ -199,6 +191,7 @@ class GUI(Ui_SignInWindow):
         first_name = fullname.split(" ")[0]
         last_name = fullname.replace(first_name, "", 1)
         self.officers_costumers["costumer"].append(Costumer(first_name, last_name, username, password, email, phone))
+        self.saveSqlite()
 
         self.set_error(self.signup.label_error, "Signing up ...", 'green')
         QtWidgets.QApplication.processEvents()
@@ -364,12 +357,12 @@ class GUI(Ui_SignInWindow):
         """
 
         # logo
-        pixmap = QPixmap('logo64.png')
+        pixmap = QPixmap(os.path.join(_ROOT_DIR, 'logo64.png'))
         object.setPixmap(pixmap)
 
         # icon
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap("logo.ico"), QtGui.QIcon.Selected, QtGui.QIcon.On)
+        icon.addPixmap(QtGui.QPixmap(os.path.join(_ROOT_DIR, "logo.ico")), QtGui.QIcon.Selected, QtGui.QIcon.On)
         main_window.setWindowIcon(icon)
 
     def set_error(self, object: QLabel, text: str = "", color: str = "red"):
@@ -962,6 +955,7 @@ class GUI(Ui_SignInWindow):
         first_name = fullname.split(" ")[0]
         last_name = fullname.replace(first_name, "", 1)
         self.officers_costumers["officer"].append(Officer(first_name, last_name, username, password, email, phone))
+        self.saveSqlite()
 
         self.set_error(self.partition.label_error_2, "Signed up the new user successfully !", 'green')
         self.empty_boxes("officer")
@@ -995,102 +989,144 @@ class GUI(Ui_SignInWindow):
                 elif self.partition.tabWidget.currentIndex() == 2:
                     pass
 
-    def saveSqlite(self):
-        """The function to save information to sqlite database"""
+    def _connect_db(self):
+        """Open (or create) the sqlite database file and return a connection."""
+        os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+        conn = connect(_DB_PATH)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
-        def create_connection(db_file):
-            try:
-                with open(db_file, "r"):
-                    pass
-            except:
-                with open(db_file, "w"):
-                    pass
+    def ensure_tables(self, conn=None):
+        """Create Books and Users tables if they do not exist yet."""
+        close_after = False
+        if conn is None:
+            conn = self._connect_db()
+            close_after = True
 
-            try:
-                conn = connect(db_file)
-                return conn
-            except:
-                return None
-
-        # create a database connection
-        conn = create_connection("D:/Uni__LibraryManagementPythonGUI-master22222/Uni__LibraryManagementPythonGUI-master/Database/Database.db")
-
-        # create books table
-        create_table_exe = """ CREATE TABLE IF NOT EXISTS Books (
-                                            id integer PRIMARY KEY,
-                                            name text NOT NULL,
-                                            author text NOT NULL,
-                                            state text,
-                                            reserved text,
-                                            borrowed text,
-                                            borrowed_time text,
-                                            return_time text
-                                        ); """
-        c = conn.cursor()
-        c.execute(create_table_exe)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Books (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                author TEXT NOT NULL,
+                state TEXT,
+                reserved TEXT,
+                borrowed TEXT,
+                borrowed_time TEXT,
+                return_time TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                first_name TEXT NOT NULL,
+                last_name TEXT NOT NULL,
+                username TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                role TEXT NOT NULL CHECK(role IN ('costumer', 'officer'))
+            )
+        """)
         conn.commit()
-        # insert data
-        if self.books:
-            for book in self.books:
-                sql = ''' INSERT OR REPLACE INTO Books(name, author)
-                              VALUES(?,?) '''
-                cur = conn.cursor()
-                cur.execute(sql, [book.name, book.author])
-                conn.commit()
+        if close_after:
+            conn.close()
+
+    def _seed_default_accounts(self):
+        """Create built-in reader and officer accounts when the Users table is empty."""
+        self.officers_costumers["costumer"].append(
+            Costumer("Azar", "Hajipuor", "azarhajipour", "1234", "azarhajipour@Gmail.Com", "09111234567"))
+        self.officers_costumers["officer"].append(
+            Officer("Mahdi", "Hajipuor", "mahdihajipour", "4321", "mahdihajipour@gmail.com", "09117654321"))
+
+    def _seed_default_books(self):
+        self.add_book("Me Before you", "Jojo Moyes")
+        self.add_book("Me After you", "Jojo Moyes")
+        self.add_book("Paris 1", "Jojo Moyes")
+        self.add_book("Paris 2", "Jojo Moyes")
+        self.add_book("Paris 3", "Jojo Moyes")
+        self.add_book("Paris 4", "Jojo Moyes")
+        self.add_book("Paris 5", "Jojo Moyes")
+        self.add_book("Paris 6", "Jojo Moyes")
+
+    def saveSqlite(self):
+        """Persist books and user/officer accounts to sqlite."""
+        conn = self._connect_db()
+        self.ensure_tables(conn)
+        cur = conn.cursor()
+
+        cur.execute("DELETE FROM Books")
+        for book in self.books:
+            cur.execute(
+                "INSERT INTO Books(name, author) VALUES(?,?)",
+                [book.name, book.author],
+            )
+
+        cur.execute("DELETE FROM Users")
+        for person in self.officers_costumers.get("costumer", []):
+            cur.execute(
+                """INSERT INTO Users(first_name, last_name, username, password, email, phone, role)
+                   VALUES(?,?,?,?,?,?,?)""",
+                [person.first_name, person.last_name, person.username, person.password,
+                 person.email, person.phone, "costumer"],
+            )
+        for person in self.officers_costumers.get("officer", []):
+            cur.execute(
+                """INSERT INTO Users(first_name, last_name, username, password, email, phone, role)
+                   VALUES(?,?,?,?,?,?,?)""",
+                [person.first_name, person.last_name, person.username, person.password,
+                 person.email, person.phone, "officer"],
+            )
+
+        conn.commit()
+        conn.close()
 
     def readSqlite(self):
         """
-            The function to load information from sqlite database,
-            if database doesn't exists it will create a officer and costumer and adds some books
+            Load books and accounts from sqlite.
+            Creates tables on startup, seeds default data when tables are empty.
         """
-
-        try:
-            with open("D:/Uni__LibraryManagementPythonGUI-master22222/Uni__LibraryManagementPythonGUI-master/Database/Database.db", "r"):
-                pass
-        except:
-            self.add_book("Me Before you", "Jojo Moyes")
-            self.add_book("Me After you", "Jojo Moyes")
-            self.add_book("Paris 1", "Jojo Moyes")
-            self.add_book("Paris 2", "Jojo Moyes")
-            self.add_book("Paris 3", "Jojo Moyes")
-            self.add_book("Paris 4", "Jojo Moyes")
-            self.add_book("Paris 5", "Jojo Moyes")
-            self.add_book("Paris 6", "Jojo Moyes")
-            return
-
-        def create_connection(db_file):
-            conn = None
-            try:
-                conn = connect(db_file)
-                return conn
-            except:
-                pass
-
-            return conn
-
-        # create a database connection
-        conn = create_connection("D:/Uni__LibraryManagementPythonGUI-master22222/Uni__LibraryManagementPythonGUI-master/Database/Database.db")
-
-        # read books data
-        self.books = []
-
+        conn = self._connect_db()
+        self.ensure_tables(conn)
         cur = conn.cursor()
-        cur.execute("SELECT * FROM Books")
+
+        self.books = []
+        cur.execute("SELECT DISTINCT name, author FROM Books")
         rows = cur.fetchall()
         for row in rows:
-            self.books.append(Book(row[1], row[2], BookState.Available))
+            self.books.append(Book(row[0], row[1], BookState.Available))
+        if not self.books:
+            self._seed_default_books()
+
+        self.officers_costumers = {"costumer": [], "officer": []}
+        cur.execute(
+            "SELECT first_name, last_name, username, password, email, phone, role FROM Users"
+        )
+        users = cur.fetchall()
+        for first_name, last_name, username, password, email, phone, role in users:
+            if role == "officer":
+                self.officers_costumers["officer"].append(
+                    Officer(first_name, last_name, username, password, email or "", phone or ""))
+            else:
+                self.officers_costumers["costumer"].append(
+                    Costumer(first_name, last_name, username, password, email or "", phone or ""))
+        if not users:
+            self._seed_default_accounts()
+
+        conn.close()
+        self.saveSqlite()
 
 
-if __name__ == "__main__":
+def main():
+    """Application entry: start sign-in window with login/register wired up."""
+    global MainWindow
+
     app = QtWidgets.QApplication(argv)
     app.setStyle(QtWidgets.QStyleFactory.create("Fusion"))
     MainWindow = QtWidgets.QMainWindow()
 
     ui = GUI()
     ui.setupUi(MainWindow)
-
-    ## for adding a new book:
-    # ui.add_book("My Name", "Tokio")
 
     ui.main()
 
@@ -1100,4 +1136,8 @@ if __name__ == "__main__":
 
     MainWindow.show()
     exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
 

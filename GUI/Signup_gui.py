@@ -224,10 +224,14 @@ class Ui_SignUpWindow(object):
 
 
 if __name__ == "__main__":
+    import os
     import sys
-    app = QtWidgets.QApplication(sys.argv)
-    SignUpWindow = QtWidgets.QDialog()
-    ui = Ui_SignUpWindow()
-    ui.setupUi(SignUpWindow)
-    SignUpWindow.show()
-    sys.exit(app.exec_())
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(root)
+    sys.path.insert(0, root)
+    sys.path.insert(0, os.path.join(root, "Code"))
+
+    from GUIManager import main
+
+    main()

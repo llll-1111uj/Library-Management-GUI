@@ -1,14 +1,7 @@
 from sys import path
-from fpdf import FPDF
 from enum import Enum
 from typing import Union
 from datetime import timedelta, datetime as Datetime
-
-##====== while testing ======##
-
-# from Code.Receipt_Bill import Bill, Receipt
-
-##====== while running ======## 
 
 from Receipt_Bill import Bill, Receipt
 
@@ -104,6 +97,8 @@ class Tools:
         Parameters:
             entry (Union[Bill, Receipt]): The entry need to be pdf.
         """
+
+        from fpdf import FPDF
 
         # create pdf, add a page
         pdf = FPDF()
