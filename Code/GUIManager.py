@@ -1,13 +1,11 @@
 import os
 from re import search
 from time import sleep
-from hashlib import md5
 from typing import Union
 from sys import path, argv, exit
 
 _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.dirname(_CODE_DIR)
-_DB_PATH = os.path.join(_ROOT_DIR, "Database", "Database.db")
 
 for _p in (_ROOT_DIR, _CODE_DIR):
     if _p not in path:
@@ -16,7 +14,6 @@ for _p in (_ROOT_DIR, _CODE_DIR):
 os.chdir(_ROOT_DIR)
 
 from PyQt5.QtCore import Qt
-from sqlite3 import connect
 from functools import partial
 from PyQt5.QtGui import QPixmap
 from datetime import datetime as Datetime
@@ -31,6 +28,7 @@ from Officer import Officer
 from Costumer import Costumer
 from Receipt_Bill import Receipt, Bill
 from Tools import BookState, Tools, CommandState
+import Database as DB
 
 from GUI.Signin_gui import Ui_SignInWindow
 from GUI.Signup_gui import Ui_SignUpWindow
@@ -207,8 +205,7 @@ class GUI(Ui_SignInWindow):
         self.set_error(self.label_error, "")
 
         username_email = self.lineEdit_username_email.text().lower()
-        # hashed password
-        password = md5(self.lineEdit_password.text().encode()).hexdigest()
+        password = self.lineEdit_password.text()
 
         if not username_email:
             self.set_error(self.label_error, "Username/Email address is empty !")
@@ -486,9 +483,11 @@ class GUI(Ui_SignInWindow):
                                       QtWidgets.QTableWidgetItem("Yes" if books[x].reserved.first_name else "No"))
                         table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
                         table.setItem(x, 5,
-                                      QtWidgets.QTableWidgetItem(books[x].borrowed_time.strftime("%Y/%m/%d")))
+                                      QtWidgets.QTableWidgetItem(
+                                          books[x].borrowed_time.strftime("%Y/%m/%d") if books[x].borrowed_time else "---"))
                         table.setItem(x, 6,
-                                      QtWidgets.QTableWidgetItem(books[x].return_time.strftime("%Y/%m/%d")))
+                                      QtWidgets.QTableWidgetItem(
+                                          books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---"))
                         x += 1
 
             else:  # if combobox is selected the 'Reserved'
@@ -514,10 +513,10 @@ class GUI(Ui_SignInWindow):
                         else:
                             table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
                             table.setItem(x, 5, QtWidgets.QTableWidgetItem(
-                                books[x].borrowed_time.strftime("%Y/%m/%d")))
+                                books[x].borrowed_time.strftime("%Y/%m/%d") if books[x].borrowed_time else "---"))
                             table.setItem(x, 6,
                                           QtWidgets.QTableWidgetItem(
-                                              books[x].return_time.strftime("%Y/%m/%d")))
+                                              books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---"))
 
                         x += 1
 
@@ -530,15 +529,17 @@ class GUI(Ui_SignInWindow):
             x = 0
             if borrowed_books:  # fill the table first with borrowed books,
                 while x < len(borrowed_books):
-                    delay = Tools.find_delay(borrowed_books[x].return_time, Datetime.now())
+                    due = borrowed_books[x].return_time
+                    borrowed_at = borrowed_books[x].borrowed_time
+                    delay = Tools.find_delay(due, Datetime.now()) if due else 0
                     bill = Tools.find_bill(delay)
 
                     table.insertRow(x)
                     table.setItem(x, 0, QtWidgets.QTableWidgetItem(borrowed_books[x].name))
                     table.setItem(x, 1, QtWidgets.QTableWidgetItem("Borrowed"))
                     table.setItem(x, 2,
-                                  QtWidgets.QTableWidgetItem(borrowed_books[x].borrowed_time.strftime("%Y/%m/%d")))
-                    table.setItem(x, 3, QtWidgets.QTableWidgetItem(borrowed_books[x].return_time.strftime("%Y/%m/%d")))
+                                  QtWidgets.QTableWidgetItem(borrowed_at.strftime("%Y/%m/%d") if borrowed_at else "---"))
+                    table.setItem(x, 3, QtWidgets.QTableWidgetItem(due.strftime("%Y/%m/%d") if due else "---"))
                     table.setItem(x, 4, QtWidgets.QTableWidgetItem(
                         str(self.user.borrowed_books[borrowed_books[x]]['extension'])))
                     table.setItem(x, 5, QtWidgets.QTableWidgetItem(str(delay)))
@@ -810,6 +811,7 @@ class GUI(Ui_SignInWindow):
                 if borrow == CommandState.Done:
                     self.requests[user][index]['accepted'] = "Accepted"
                     self.set_error(self.partition.label_error, "User request accepted !", 'green')
+                    DB.persist_borrow(user, info['book'], time, info['book'].return_time)
 
                 elif borrow == CommandState.BorrowedBefore:
                     self.set_error(self.partition.label_error, "User already borrowed this book !")
@@ -823,6 +825,7 @@ class GUI(Ui_SignInWindow):
                 if reserve == CommandState.Done:
                     self.requests[user][index]['accepted'] = "Accepted"
                     self.set_error(self.partition.label_error, "User request accepted !", 'green')
+                    DB.persist_reserve(user, info['book'], time)
 
                 elif reserve == CommandState.MaximumReserved:
                     self.set_error(self.partition.label_error, "User's maximum reserved books reached !")
@@ -837,6 +840,7 @@ class GUI(Ui_SignInWindow):
                 if extension == CommandState.Done:
                     self.requests[user][index]['accepted'] = "Accepted"
                     self.set_error(self.partition.label_error, "User request accepted !", 'green')
+                    DB.persist_extension(user, info['book'], info['book'].return_time)
 
                 elif extension == CommandState.ExtensionLimitReached:
                     self.set_error(self.partition.label_error, "User passed the limit of maximum extension days !")
@@ -854,15 +858,20 @@ class GUI(Ui_SignInWindow):
                 if return_ == CommandState.Done:
                     self.requests[user][index]['accepted'] = "Accepted"
                     self.set_error(self.partition.label_error, "User request accepted ! Issue a receipt", 'green')
+                    DB.persist_return(user, info['book'], time)
 
                 else:
                     self.requests[user][index]['accepted'] = "Accepted"
                     self.set_error(self.partition.label_error,
                                    f"User request accepted ! Issue a bill for {return_[-1]} $", 'green')
+                    DB.persist_return(user, info['book'], time)
 
         else:  # if deny button clicked
             self.requests[user][index]['accepted'] = "Denied"
             self.set_error(self.partition.label_error, "User request denied !", 'green')
+
+        if hasattr(self.partition, "tableWidget_books"):
+            self.fill_table(self.partition.tableWidget_books, "books", self.partition.comboBox_books)
 
         self.fill_list(self.partition.listWidget, 'officer')
 
@@ -990,45 +999,16 @@ class GUI(Ui_SignInWindow):
                     pass
 
     def _connect_db(self):
-        """Open (or create) the sqlite database file and return a connection."""
-        os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-        conn = connect(_DB_PATH)
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        return DB.get_connection()
 
     def ensure_tables(self, conn=None):
-        """Create Books and Users tables if they do not exist yet."""
+        """启动时创建 Users/Books/reserve/borrow_record/message_notify。"""
         close_after = False
         if conn is None:
-            conn = self._connect_db()
+            conn = DB.init_database()
             close_after = True
-
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS Books (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                author TEXT NOT NULL,
-                state TEXT,
-                reserved TEXT,
-                borrowed TEXT,
-                borrowed_time TEXT,
-                return_time TEXT
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS Users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                first_name TEXT NOT NULL,
-                last_name TEXT NOT NULL,
-                username TEXT NOT NULL UNIQUE,
-                password TEXT NOT NULL,
-                email TEXT,
-                phone TEXT,
-                role TEXT NOT NULL CHECK(role IN ('costumer', 'officer'))
-            )
-        """)
-        conn.commit()
+        else:
+            DB.init_database()
         if close_after:
             conn.close()
 
@@ -1050,71 +1030,30 @@ class GUI(Ui_SignInWindow):
         self.add_book("Paris 6", "Jojo Moyes")
 
     def saveSqlite(self):
-        """Persist books and user/officer accounts to sqlite."""
-        conn = self._connect_db()
-        self.ensure_tables(conn)
-        cur = conn.cursor()
-
-        cur.execute("DELETE FROM Books")
-        for book in self.books:
-            cur.execute(
-                "INSERT INTO Books(name, author) VALUES(?,?)",
-                [book.name, book.author],
-            )
-
-        cur.execute("DELETE FROM Users")
-        for person in self.officers_costumers.get("costumer", []):
-            cur.execute(
-                """INSERT INTO Users(first_name, last_name, username, password, email, phone, role)
-                   VALUES(?,?,?,?,?,?,?)""",
-                [person.first_name, person.last_name, person.username, person.password,
-                 person.email, person.phone, "costumer"],
-            )
-        for person in self.officers_costumers.get("officer", []):
-            cur.execute(
-                """INSERT INTO Users(first_name, last_name, username, password, email, phone, role)
-                   VALUES(?,?,?,?,?,?,?)""",
-                [person.first_name, person.last_name, person.username, person.password,
-                 person.email, person.phone, "officer"],
-            )
-
-        conn.commit()
-        conn.close()
+        """将用户与图书（含状态、日期）同步写入数据库，不删除借阅/预约/消息记录。"""
+        DB.init_database()
+        DB.save_users_and_books(self.officers_costumers, self.books)
 
     def readSqlite(self):
         """
-            Load books and accounts from sqlite.
-            Creates tables on startup, seeds default data when tables are empty.
+            启动时建表、加载用户和图书，并刷新逾期/预约到期消息。
         """
-        conn = self._connect_db()
-        self.ensure_tables(conn)
-        cur = conn.cursor()
+        DB.init_database()
+        self.officers_costumers, users_by_id = DB.load_users()
+        if not users_by_id:
+            self.officers_costumers = {"costumer": [], "officer": []}
+            self._seed_default_accounts()
+            DB.save_users_and_books(self.officers_costumers, [])
+            self.officers_costumers, users_by_id = DB.load_users()
 
-        self.books = []
-        cur.execute("SELECT DISTINCT name, author FROM Books")
-        rows = cur.fetchall()
-        for row in rows:
-            self.books.append(Book(row[0], row[1], BookState.Available))
+        self.books, books_by_id = DB.load_books(users_by_id)
         if not self.books:
             self._seed_default_books()
+            DB.save_users_and_books(self.officers_costumers, self.books)
+            self.books, books_by_id = DB.load_books(users_by_id)
 
-        self.officers_costumers = {"costumer": [], "officer": []}
-        cur.execute(
-            "SELECT first_name, last_name, username, password, email, phone, role FROM Users"
-        )
-        users = cur.fetchall()
-        for first_name, last_name, username, password, email, phone, role in users:
-            if role == "officer":
-                self.officers_costumers["officer"].append(
-                    Officer(first_name, last_name, username, password, email or "", phone or ""))
-            else:
-                self.officers_costumers["costumer"].append(
-                    Costumer(first_name, last_name, username, password, email or "", phone or ""))
-        if not users:
-            self._seed_default_accounts()
-
-        conn.close()
-        self.saveSqlite()
+        DB.restore_user_book_state(self.officers_costumers, books_by_id)
+        DB.refresh_notifications()
 
 
 def main():

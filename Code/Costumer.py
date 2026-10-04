@@ -1,6 +1,5 @@
 from sys import path
 from re import search
-from hashlib import md5
 from typing import Union
 from datetime import datetime as Datetime
 
@@ -34,6 +33,7 @@ class Costumer(Person):
                 phone (str): The string value of phone
         """
 
+        self.user_id = None
         self.first_name = first_name
         self.last_name = last_name
         self.username = username
@@ -77,12 +77,7 @@ class Costumer(Person):
 
     @password.setter
     def password(self, password: str):
-        # use md5 hashing to hash the password if not hashed yet
-        if len(password) == 32:
-            self._password = password
-        else:
-            result = md5(password.encode())
-            self._password = result.hexdigest()
+        self._password = password
 
     @property
     def email(self) -> str:

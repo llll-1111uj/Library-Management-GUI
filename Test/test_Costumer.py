@@ -1,6 +1,5 @@
 import pytest
 from sys import path
-from hashlib import md5
 from datetime import datetime as Datetime
 
 path.insert(1, '../')
@@ -30,12 +29,12 @@ class TestCostumer:
 
     def test_credintial(self, setUp):
         assert self.costumer1.username == "zahrakarimi"
-        assert self.costumer1.password == md5("1234".encode()).hexdigest()
+        assert self.costumer1.password == "1234"
         assert self.costumer1.email == "zahrakarimi@gmail.com"
         assert self.costumer1.phone == "+989101234567"
 
         assert self.costumer2.username == "fatemeazizi"
-        assert self.costumer2.password == md5("4321".encode()).hexdigest()
+        assert self.costumer2.password == "4321"
         assert self.costumer2.email == "---"
         assert self.costumer2.phone == "---"
 

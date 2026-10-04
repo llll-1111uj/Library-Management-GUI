@@ -1,10 +1,16 @@
-import sys
-import os
+import sqlite3, csv
 
-base_path = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, base_path)
+conn = sqlite3.connect("library.db")
+cur = conn.cursor()
+cur.execute('''CREATE TABLE IF NOT EXISTS books(
+    id INTEGER PRIMARY KEY, title TEXT, author TEXT, isbn TEXT,
+    publisher TEXT, year INTEGER, category TEXT, price REAL, stock INTEGER)''')
 
-from Code.GUIManager import main
-
-if __name__ == "__main__":
-    main()
+with open("library_books.csv", encoding="utf-8-sig") as f:
+    reader = csv.DictReader(f)
+    for r in reader:
+        cur.execute("INSERT INTO books VALUES(?,?,?,?,?,?,?,?,?)",
+                    (r["图书ID"], r["书名"], r["作者"], r["ISBN"], r["出版社"],
+                     int(r["出版年份"]), r["分类"], float(r["价格"]), int(r["库存数量"])))
+conn.commit()
+print("导入成功，共", cur.execute("SELECT COUNT(*) FROM books").fetchone()[0], "条")

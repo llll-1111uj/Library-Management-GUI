@@ -20,9 +20,9 @@ class Book(Lending):
             reserved (Person): The Person reserved the book
     """
 
-    def __init__(self, name: str, author: str, state: BookState, borrowed: Person = Person(),
-                 borrowed_time: Datetime = Datetime.now(), return_time: Datetime = Datetime.now(),
-                 reserved: Person = Person()):
+    def __init__(self, name: str, author: str, state: BookState, borrowed: Person = None,
+                 borrowed_time: Datetime = None, return_time: Datetime = None,
+                 reserved: Person = None):
         """
             Constructor function,
 
@@ -36,11 +36,12 @@ class Book(Lending):
                 reserved (Person): The Person reserved the book
         """
 
+        self.book_id = None
         self.name = name
         self.author = author
         self.state = state
-        self.reserved = reserved
-        self.borrowed = borrowed
+        self.reserved = reserved if reserved is not None else Person()
+        self.borrowed = borrowed if borrowed is not None else Person()
         self.borrowed_time = borrowed_time
         self.return_time = return_time
 
@@ -114,10 +115,10 @@ class Book(Lending):
             function for string returning of class,
         """
 
-        if self.borrowed.first_name:
+        if self.borrowed and getattr(self.borrowed, "first_name", None):
             borrow_person = f'{self.borrowed.first_name} {self.borrowed.last_name}'
-            borrow_time = self.borrowed_time.strftime("%Y/%m/%d")
-            return_time = self.return_time.strftime("%Y/%m/%d")
+            borrow_time = self.borrowed_time.strftime("%Y/%m/%d") if self.borrowed_time else "---"
+            return_time = self.return_time.strftime("%Y/%m/%d") if self.return_time else "---"
 
         else:
             borrow_person, borrow_time, return_time = "---", "---", "---"

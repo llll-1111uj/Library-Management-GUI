@@ -16,4 +16,16 @@ print("\n===== Books图书表 =====")
 for row in cur.execute("SELECT * FROM Books"):
     print(row)
 
+print("\n==== reserve 预约表 ====")
+for row in cur.execute("SELECT * FROM reserve"):
+    print(row)
+
+print("\n==== borrow__record 借阅记录表 ====")
+for row in cur.execute("SELECT * FROM borrow_record"):
+    print(row)
+
+print("\n==== message_notify 消息通知表 ====")
+for row in cur.execute("SELECT * FROM message_notify"):
+    print(row)
+
 conn.close()
