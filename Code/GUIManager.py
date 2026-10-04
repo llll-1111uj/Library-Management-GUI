@@ -119,21 +119,7 @@ class GUI(Ui_SignInWindow):
 
         self.signup = Ui_SignUpWindow()
         self.signup.setupUi(self.signup_app)
-
-        # ==========只给注册窗口设置大小+居中【粘贴在这里】==========
-        self.signup_app.setMaximumSize(16777215, 16777215)
-        self.signup_app.setMinimumSize(780, 950)
-        self.signup_app.resize(840, 1000)
-
-        # 窗口居中
-        screen_geo = QtWidgets.QApplication.desktop().availableGeometry()
-        win_geo = self.signup_app.frameGeometry()
-        win_geo.moveCenter(screen_geo.center())
-        self.signup_app.move(win_geo.topLeft())
-        # ======================================================
-
-
-        # ================================================
+        self.signup_app.setSizeGripEnabled(True)
 
         self.signup.pushButton_Signup.clicked.connect(self.sign_up)
 
@@ -254,18 +240,7 @@ class GUI(Ui_SignInWindow):
         if self.user in self.officers_costumers['costumer']:  # if it's a costumer
             self.partition = Ui_CostumerWindow()
             self.partition.setupUi(partition_app)
-            # =========窗口大小+居中=========
-            partition_app.setMaximumSize(16777215, 16777215)
-            # 最小窗口，不能再比这个更小，保证全部控件都装得下
-            partition_app.setMinimumSize(900, 850)
-            # 当前打开的窗口大小
-            partition_app.resize(960, 900)
-
-            # 窗口居中
-            screen_geo = QtWidgets.QApplication.desktop().availableGeometry()
-            window_geo = partition_app.frameGeometry()
-            window_geo.moveCenter(screen_geo.center())
-            partition_app.move(window_geo.topLeft())
+            partition_app.setSizeGripEnabled(True)
 
             # ========= 新增：设置列表滚动条（读者端） =========
             self.partition.listWidget.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
@@ -294,21 +269,7 @@ class GUI(Ui_SignInWindow):
         else:  # if it's a officer
             self.partition = Ui_OfficerWindow()
             self.partition.setupUi(partition_app)
-
-
-            # =========窗口大小+居中=========
-            partition_app.setMaximumSize(16777215, 16777215)
-            # 最小窗口，不能再比这个更小，保证全部控件都装得下
-            partition_app.setMinimumSize(900, 850)
-            # 当前打开的窗口大小
-            partition_app.resize(960, 900)
-
-            # 窗口居中
-            screen_geo = QtWidgets.QApplication.desktop().availableGeometry()
-            window_geo = partition_app.frameGeometry()
-            window_geo.moveCenter(screen_geo.center())
-            partition_app.move(window_geo.topLeft())
-            # =============================
+            partition_app.setSizeGripEnabled(True)
 
             # ========= 新增：设置列表滚动条（管理员端） =========
             self.partition.listWidget.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
