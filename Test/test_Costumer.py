@@ -12,6 +12,25 @@ from Code.Tools import BookState, CommandState, Tools
 from Code.Password import is_hashed, verify_password
 
 
+def _cmd(value):
+    return getattr(value, "value", value)
+
+
+def _assert_cmd(actual, expected):
+    assert _cmd(actual) == _cmd(expected)
+
+
+def _assert_orders(actual, expected):
+    assert len(actual) == len(expected)
+    for got, want in zip(actual, expected):
+        assert set(got.keys()) == set(want.keys())
+        for key, value in want.items():
+            if key == "state":
+                assert _cmd(got[key]) == _cmd(value)
+            else:
+                assert got[key] == value
+
+
 class TestCostumer:
     @pytest.fixture
     def setUp(self):
@@ -51,20 +70,20 @@ class TestCostumer:
         time2 = Datetime.now()
         time3 = Datetime.now()
         time4 = Datetime.now()
-        assert self.costumer1.borrow_book(self.book1, time1) == CommandState.Done
-        assert self.costumer1.borrow_book(self.book2, time2, 14) == CommandState.Done
-        assert self.costumer1.borrow_book(self.book3, time3, 22) == CommandState.Done
+        _assert_cmd(self.costumer1.borrow_book(self.book1, time1), CommandState.Done)
+        _assert_cmd(self.costumer1.borrow_book(self.book2, time2, 14), CommandState.Done)
+        _assert_cmd(self.costumer1.borrow_book(self.book3, time3, 22), CommandState.Done)
 
-        assert self.costumer1.borrow_book(self.book1, time1) == CommandState.BorrowedBefore
-        assert self.costumer1.borrow_book(self.book4, time4, 20) == CommandState.MaximumBorrow
+        _assert_cmd(self.costumer1.borrow_book(self.book1, time1), CommandState.BorrowedBefore)
+        _assert_cmd(self.costumer1.borrow_book(self.book4, time4, 20), CommandState.MaximumBorrow)
 
-        assert self.costumer1.orders == [
+        _assert_orders(self.costumer1.orders, [
             {'book': self.book1, 'order': 'borrowing book', 'date': time1, 'state': CommandState.Done},
             {'book': self.book2, 'order': 'borrowing book', 'date': time2, 'state': CommandState.Done},
             {'book': self.book3, 'order': 'borrowing book', 'date': time3, 'state': CommandState.Done},
             {'book': self.book1, 'order': 'borrowing book', 'date': time1, 'state': CommandState.BorrowedBefore},
             {'book': self.book4, 'order': 'borrowing book', 'date': time4,
-             'state': CommandState.MaximumBorrow}]
+             'state': CommandState.MaximumBorrow}])
 
         assert list(self.costumer1.borrowed_books.keys()) == [self.book1, self.book2, self.book3]
 
@@ -93,10 +112,10 @@ class TestCostumer:
         time2 = Datetime.now()
         time3 = Datetime.now()
         time4 = Datetime.now()
-        assert self.costumer1.reserve_book(self.book1, time1) == CommandState.Done
-        assert self.costumer1.reserve_book(self.book2, time2) == CommandState.Done
-        assert self.costumer1.reserve_book(self.book3, time3) == CommandState.Done
-        assert self.costumer1.reserve_book(self.book4, time4) == CommandState.MaximumReserved
+        _assert_cmd(self.costumer1.reserve_book(self.book1, time1), CommandState.Done)
+        _assert_cmd(self.costumer1.reserve_book(self.book2, time2), CommandState.Done)
+        _assert_cmd(self.costumer1.reserve_book(self.book3, time3), CommandState.Done)
+        _assert_cmd(self.costumer1.reserve_book(self.book4, time4), CommandState.MaximumReserved)
 
         assert self.costumer1.reserve == [self.book1, self.book2, self.book3]
 
@@ -105,12 +124,12 @@ class TestCostumer:
         assert self.book3.reserved == self.costumer1
         assert self.book4.reserved != self.costumer1
 
-        assert self.costumer1.orders == [
+        _assert_orders(self.costumer1.orders, [
             {'book': self.book1, 'order': 'reserving book', 'date': time1, 'state': CommandState.Done},
             {'book': self.book2, 'order': 'reserving book', 'date': time2, 'state': CommandState.Done},
             {'book': self.book3, 'order': 'reserving book', 'date': time3, 'state': CommandState.Done},
             {'book': self.book4, 'order': 'reserving book', 'date': time4,
-             'state': CommandState.MaximumReserved}]
+             'state': CommandState.MaximumReserved}])
 
     def test_extension_book(self, setUp):
         time1 = Datetime.now()
@@ -123,11 +142,11 @@ class TestCostumer:
         time4 = Datetime.now()
         time5 = Datetime.now()
         time6 = Datetime.now()
-        assert self.costumer1.extension_book(self.book1, time3, 1) == CommandState.Done
-        assert self.costumer1.extension_book(self.book1, time4, 6) == CommandState.Done
-        assert self.costumer1.extension_book(self.book1, time5, 1) == CommandState.NoMoreExtension
+        _assert_cmd(self.costumer1.extension_book(self.book1, time3, 1), CommandState.Done)
+        _assert_cmd(self.costumer1.extension_book(self.book1, time4, 6), CommandState.Done)
+        _assert_cmd(self.costumer1.extension_book(self.book1, time5, 1), CommandState.NoMoreExtension)
 
-        assert self.costumer1.extension_book(self.book2, time6, 8) == CommandState.ExtensionLimitReached
+        _assert_cmd(self.costumer1.extension_book(self.book2, time6, 8), CommandState.ExtensionLimitReached)
 
         assert self.costumer1.borrowed_books[self.book1]['return_time'] == Tools.add_time(book1_return_time, 7)
         assert self.costumer1.borrowed_books[self.book1]['extension'] == 7
@@ -135,7 +154,7 @@ class TestCostumer:
         assert self.costumer1.borrowed_books[self.book2]['return_time'] == self.book2.return_time
         assert self.costumer1.borrowed_books[self.book2]['extension'] == 0
 
-        assert self.costumer1.orders == [
+        _assert_orders(self.costumer1.orders, [
             {'book': self.book1, 'order': 'borrowing book', 'date': time1, 'state': CommandState.Done},
             {'book': self.book2, 'order': 'borrowing book', 'date': time2, 'state': CommandState.Done},
             {'book': self.book1, 'order': 'extension returning date of book', 'date': time3,
@@ -145,7 +164,7 @@ class TestCostumer:
             {'book': self.book1, 'order': 'extension returning date of book', 'date': time5,
              'state': CommandState.NoMoreExtension},
             {'book': self.book2, 'order': 'extension returning date of book', 'date': time6,
-             'state': CommandState.ExtensionLimitReached}]
+             'state': CommandState.ExtensionLimitReached}])
 
     def test_return_book(self, setUp):
         time1 = Datetime.now()
@@ -164,16 +183,17 @@ class TestCostumer:
         time5 = Datetime.now()
         time6 = Datetime.now()
         time7 = Datetime.now()
-        assert self.costumer1.return_book(self.book1, time3, self.book1.return_time) == CommandState.Done
-        assert self.costumer1.return_book(self.book2, time4, Tools.add_time(self.book2.return_time, 7)) == [
-            CommandState.Bill, 14]
-        assert self.costumer1.return_book(self.book3, time5, Tools.add_time(self.book3.return_time, 9)) == [
-            CommandState.Bill, 24]
+        returned = self.costumer1.return_book(self.book1, time3, self.book1.return_time)
+        _assert_cmd(returned, CommandState.Done)
+        billed = self.costumer1.return_book(self.book2, time4, Tools.add_time(self.book2.return_time, 7))
+        assert _cmd(billed[0]) == _cmd(CommandState.Bill) and billed[1] == 14
+        billed2 = self.costumer1.return_book(self.book3, time5, Tools.add_time(self.book3.return_time, 9))
+        assert _cmd(billed2[0]) == _cmd(CommandState.Bill) and billed2[1] == 24
         assert not len(self.costumer1.borrowed_books)
 
         assert self.book1.state == BookState.Available and self.book2.state == BookState.Available and self.book3.state == BookState.Available
 
-        assert self.costumer1.orders == [
+        _assert_orders(self.costumer1.orders, [
             {'book': self.book1, 'order': 'borrowing book', 'date': time1, 'state': CommandState.Done},
             {'book': self.book2, 'order': 'borrowing book', 'date': time2, 'state': CommandState.Done},
             {'book': self.book3, 'order': 'borrowing book', 'date': time3, 'state': CommandState.Done},
@@ -185,7 +205,7 @@ class TestCostumer:
             {'book': self.book2, 'order': 'returning book', 'date': time6, 'state': CommandState.Bill,
              'bill': 14},
             {'book': self.book3, 'order': 'returning book', 'date': time7, 'state': CommandState.Bill,
-             'bill': 24}]
+             'bill': 24}])
 
         self.costumer1.returned_books = {
             self.book1: {'borrowed_time': time1, 'returned_time': book1_borrowed_time,

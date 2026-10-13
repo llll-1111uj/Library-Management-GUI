@@ -43,42 +43,15 @@ class Tools:
 
     @staticmethod
     def find_delay(allowed_date: Datetime, returned_date: Datetime) -> int:
-        """
-        The function to find delay of two given dates.
-
-        Parameters:
-            allowed_date (Datetime): The first date.
-            allowed_date (Datetime): The second date.
-
-        Returns:
-            days: The days between two dates.
-        """
-
-        time = returned_date - allowed_date
-        if time.days <= 0:
-            return 0
-        return time.days
+        # REFACTOR-TRANSITION: rules live in domain.rules
+        from domain.rules import find_delay as _find_delay
+        return _find_delay(allowed_date, returned_date)
 
     @staticmethod
     def find_bill(delay: int):
-        """
-        The function to find bill cost by delay days.
-
-        Parameters:
-            delay (int): The delayed days.
-
-        Returns:
-            bill: The cost of delayed days.
-        """
-
-        if delay <= 0:
-            return 0
-
-        elif delay <= 7:
-            return 2 * delay
-
-        else:
-            return (2 * 7) + (5 * (delay - 7))
+        # REFACTOR-TRANSITION: rules live in domain.rules
+        from domain.rules import find_bill as _find_bill
+        return _find_bill(delay)
 
     @staticmethod
     def create_pdf(entry: Union[Bill, Receipt]):

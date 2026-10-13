@@ -62,15 +62,21 @@ def upsert_user_on_conn(conn, person, role=None):
 class UserRepository:
     def __init__(self, db_path=None):
         self.db_path = db_path
+        self._cache_map = None
+        self._cache_by_id = None
 
     def _conn(self):
         return get_connection(self.db_path)
+
+    def invalidate_cache(self):
+        self._cache_map = None
+        self._cache_by_id = None
 
     def ensure_schema(self):
         conn = init_database(self.db_path)
         conn.close()
 
-    def list_all(self):
+    def _load_all_from_db(self):
         # REFACTOR-TRANSITION: reload officers as Officer, not User.
         from Officer import Officer
 
@@ -97,8 +103,29 @@ class UserRepository:
             person.user_id = user_id
             person.role = role or "costumer"
             by_id[user_id] = person
+        return result, by_id
+
+    def list_all(self):
+        if self._cache_map is not None and self._cache_by_id is not None:
+            logger.debug("users cache hit count=%s", len(self._cache_by_id))
+            return self._cache_map, self._cache_by_id
+        result, by_id = self._load_all_from_db()
+        self._cache_map = result
+        self._cache_by_id = by_id
         logger.info("loaded %s users", len(by_id))
         return result, by_id
+
+    def get(self, user_id):
+        _map, by_id = self.list_all()
+        return by_id.get(user_id)
+
+    def get_by_username_or_email(self, identity):
+        identity = (identity or "").lower()
+        users_map, _by_id = self.list_all()
+        for person in users_map.get("costumer", []) + users_map.get("officer", []):
+            if person.username == identity or person.email == identity:
+                return person
+        return None
 
     def upsert(self, person, role=None, conn=None):
         close_after = False
@@ -109,6 +136,8 @@ class UserRepository:
             user_id = upsert_user_on_conn(conn, person, role)
             if close_after:
                 conn.commit()
+            self.invalidate_cache()
+            logger.info("users changed username=%s role=%s", person.username, getattr(person, "role", role))
             return user_id
         except Exception:
             if close_after:
@@ -126,6 +155,8 @@ class UserRepository:
             for person in users_map.get("officer", []):
                 upsert_user_on_conn(conn, person, "officer")
             conn.commit()
+            self.invalidate_cache()
+            logger.info("users snapshot saved")
         except Exception:
             conn.rollback()
             logger.exception("save users failed")

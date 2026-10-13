@@ -1,6 +1,7 @@
 """SQLite connection and schema. Canonical DB path: Database/Database.db."""
 import logging
 import os
+import sys
 from datetime import datetime as Datetime
 from sqlite3 import connect, Connection
 
@@ -8,8 +9,10 @@ from domain.password import hash_password, is_hashed
 
 logger = logging.getLogger(__name__)
 
-_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT_DIR = os.path.dirname(_CODE_DIR)
+if getattr(sys, "frozen", False):
+    _ROOT_DIR = os.path.dirname(sys.executable)
+else:
+    _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(_ROOT_DIR, "Database", "Database.db")
 
 DT_FMT = "%Y-%m-%d %H:%M:%S"
@@ -107,8 +110,41 @@ CREATE TABLE IF NOT EXISTS borrow_record (
     due_time TEXT,                               -- 应还时间（用于逾期判断）
     return_time TEXT,                            -- 实际归还时间，未还则为空
     borrow_status TEXT NOT NULL,                 -- 借阅状态：borrowed/returned/overdue
+    extension_days INTEGER NOT NULL DEFAULT 0,   -- 累计续期天数（目标由 requests.extra_days 表示）
     FOREIGN KEY (user_id) REFERENCES Users(user_id),
     FOREIGN KEY (book_id) REFERENCES Books(book_id)
+)
+"""
+
+SQL_CREATE_REQUESTS = """
+CREATE TABLE IF NOT EXISTS requests (
+    request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    book_id INTEGER NOT NULL,
+    request_type TEXT NOT NULL
+        CHECK(request_type IN ('BORROW', 'RESERVE', 'RENEW', 'RETURN')),
+    status TEXT NOT NULL
+        CHECK(status IN ('PENDING', 'ACCEPTED', 'DENIED', 'CANCELLED')),
+    extra_days INTEGER NOT NULL DEFAULT 0, -- RENEW：目标累计续期天数
+    created_at TEXT NOT NULL,
+    handled_by INTEGER,
+    handled_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    FOREIGN KEY (book_id) REFERENCES Books(book_id),
+    FOREIGN KEY (handled_by) REFERENCES Users(user_id)
+)
+"""
+
+SQL_CREATE_AUDIT_LOG = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id INTEGER,
+    detail TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
 )
 """
 
@@ -179,6 +215,14 @@ def _normalize_passwords(cur):
             logger.exception("password upgrade failed user_id=%s username=%s", user_id, username)
 
 
+def _ensure_column(cur, table, column, ddl_type):
+    if not _table_exists(cur, table):
+        return
+    if column in _columns(cur, table):
+        return
+    cur.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, ddl_type))
+
+
 def _migrate_books(cur):
     if not _table_exists(cur, "Books"):
         cur.execute(SQL_CREATE_BOOKS)
@@ -221,6 +265,11 @@ def init_database(db_path=None):
         cur.execute(SQL_CREATE_RESERVE)
         cur.execute(SQL_CREATE_BORROW_RECORD)
         cur.execute(SQL_CREATE_MESSAGE_NOTIFY)
+        cur.execute(SQL_CREATE_REQUESTS)
+        cur.execute(SQL_CREATE_AUDIT_LOG)
+        _ensure_column(cur, "borrow_record", "extension_days", "INTEGER NOT NULL DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_books_name_author ON Books(name, author)")
         _normalize_passwords(cur)
         conn.commit()
         cur.execute("PRAGMA foreign_keys = ON")

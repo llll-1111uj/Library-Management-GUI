@@ -11,6 +11,7 @@ import pytest
 from domain.exceptions import AuthError
 from domain.password import is_hashed, verify_password
 from domain.user import User
+from repository.audit_repository import AuditRepository
 from repository.connection import get_connection, init_database
 from repository.user_repository import UserRepository
 from service.auth_service import AuthService
@@ -94,3 +95,22 @@ class TestAuthService:
         assert officer.role == "officer"
         assert is_hashed(officer.password)
         assert verify_password("4321", officer.password)
+
+    def test_login_audit_writes_user_id(self, auth):
+        service, repo, db_path = auth
+        service.seed_defaults()
+        users, _by_id = repo.list_all()
+        service.login("azarhajipour", "1234", users["costumer"] + users["officer"])
+        rows = AuditRepository(db_path).list_by_action("LOGIN")
+        assert rows
+        assert rows[0][1] is not None
+
+    def test_failed_login_audit_null_user_id(self, auth):
+        service, repo, db_path = auth
+        service.seed_defaults()
+        users, _by_id = repo.list_all()
+        with pytest.raises(AuthError):
+            service.login("azarhajipour", "wrong-password", users["costumer"] + users["officer"])
+        rows = AuditRepository(db_path).list_by_action("LOGIN_FAILED")
+        assert rows
+        assert rows[0][1] is None

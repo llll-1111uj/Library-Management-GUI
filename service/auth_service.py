@@ -5,6 +5,7 @@ from re import search
 from domain.exceptions import AuthError
 from domain.password import is_hashed, verify_password
 from domain.user import User
+from repository.audit_repository import AuditRepository
 from repository.user_repository import UserRepository
 
 logger = logging.getLogger(__name__)
@@ -13,8 +14,9 @@ _EMAIL_RE = '^[A-Za-z0-9._%+-]+[@][A-Za-z0-9.-]+[A-Z|a-z]{2,3}$'
 
 
 class AuthService:
-    def __init__(self, user_repo=None):
+    def __init__(self, user_repo=None, audit_repo=None):
         self.user_repo = user_repo or UserRepository()
+        self.audit_repo = audit_repo or AuditRepository(getattr(self.user_repo, "db_path", None))
 
     def _validate_register(self, username, password, password_2, fullname, email, taken_usernames):
         if not username:
@@ -43,6 +45,8 @@ class AuthService:
             person = User(first_name, last_name, username, password, email, phone, role="costumer")
         try:
             self.user_repo.upsert(person, role=person.role)
+            action = "ADD_OFFICER" if role == "officer" else "REGISTER"
+            self.audit_repo.add(person.user_id, action, "user", person.user_id, username)
         except Exception:
             logger.exception("register persist failed username=%s role=%s", username, role)
             raise
@@ -80,7 +84,9 @@ class AuthService:
                     logger.exception("login password upgrade failed username=%s", entrance.username)
                     raise
             logger.info("login ok username=%s", entrance.username)
+            self.audit_repo.add(entrance.user_id, "LOGIN", "user", entrance.user_id, entrance.username)
             return entrance
+        self.audit_repo.add(None, "LOGIN_FAILED", "user", None, identity)
         raise AuthError("Username/Email address or password incorrect !")
 
     def seed_defaults(self):

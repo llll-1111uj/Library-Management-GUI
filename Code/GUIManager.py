@@ -1,11 +1,16 @@
 import logging
 import os
+import sys
 from time import sleep
 from typing import Union
 from sys import path, argv, exit
 
-_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT_DIR = os.path.dirname(_CODE_DIR)
+if getattr(sys, "frozen", False):
+    _ROOT_DIR = os.path.dirname(sys.executable)
+    _CODE_DIR = getattr(sys, "_MEIPASS", _ROOT_DIR)
+else:
+    _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _ROOT_DIR = os.path.dirname(_CODE_DIR)
 
 for _p in (_ROOT_DIR, _CODE_DIR):
     if _p not in path:
@@ -27,15 +32,43 @@ from Person import Person
 from Receipt_Bill import Receipt, Bill
 from Tools import BookState, Tools, CommandState
 from Officer import Officer  # noqa: F401  # REFACTOR-TRANSITION: keep Officer class; do not replace with User.
-# TODO(A3): GUIManager still uses Database for persist_*/saveSqlite/readSqlite book load.
-# REFACTOR-TRANSITION: book/loan persistence still goes through deprecated Database.py.
-import Database as DB
-from domain.exceptions import AuthError
-from repository.connection import get_connection, init_database
+from domain.exceptions import ApprovalError, AuthError, RequestAlreadyHandled
+from domain.request import RequestStatus, RequestType
+from domain.rules import find_bill, find_delay
+from repository.audit_repository import AuditRepository
 from repository.book_repository import BookRepository
+from repository.borrow_repository import BorrowRepository, restore_user_book_state
+from repository.connection import get_connection, init_database
+from repository.notify import refresh_notifications
+from repository.request_repository import RequestRepository
 from repository.user_repository import UserRepository
+from service.approval_service import ApprovalService
 from service.auth_service import AuthService
 from service.book_service import BookService, action_visibility
+from service.borrow_service import BorrowService
+from service.user_service import UserService
+
+_STATUS_LABEL = {
+    RequestStatus.PENDING: "Not Accepted",
+    RequestStatus.ACCEPTED: "Accepted",
+    RequestStatus.DENIED: "Denied",
+    RequestStatus.CANCELLED: "Denied",
+}
+_TYPE_LABEL = {
+    RequestType.BORROW: "borrow",
+    RequestType.RESERVE: "reserve",
+    RequestType.RENEW: "extension",
+    RequestType.RETURN: "return",
+}
+_BOOK_HEADER_SORT = {
+    0: "name",
+    1: "author",
+    2: "state",
+    3: "reserved_user_id",
+    4: "borrowed_user_id",
+    5: "borrowed_time",
+    6: "return_time",
+}
 
 from GUI.Signin_gui import Ui_SignInWindow
 from GUI.Signup_gui import Ui_SignUpWindow
@@ -61,7 +94,6 @@ class GUI(Ui_SignInWindow):
             self.books: to keep books
             self.partition: to keep the partition window
             self.user: to keep the signed in user
-            self.requests: to keep the requests of costumers
         """
 
         super().__init__()
@@ -69,11 +101,20 @@ class GUI(Ui_SignInWindow):
         self.books = []
         self.partition = None
         self.user = None
-        self.requests = {}
         self.user_repo = UserRepository()
         self.auth = AuthService(self.user_repo)
         self.book_repo = BookRepository()
         self.book_service = BookService(self.book_repo, self.user_repo)
+        self.user_service = UserService(self.user_repo)
+        self.request_repo = RequestRepository()
+        self.borrow_repo = BorrowRepository()
+        self.borrow_service = BorrowService(self.request_repo)
+        self.approval_service = ApprovalService()
+        self.audit_repo = AuditRepository()
+        self._book_page = 1
+        self._book_sort_by = "name"
+        self._book_sort_dir = "ASC"
+        self._filling_books = False
 
     def setupUi(self, MainWindow):
         """CMS_UI parent class function"""
@@ -104,12 +145,10 @@ class GUI(Ui_SignInWindow):
         """
         self.officers_costumers = {"costumer": [], "officer": []}
         self.books = []
-        self.requests = {}
 
         self.readSqlite()
         if self.officers_costumers["costumer"]:
             self.user = self.officers_costumers["costumer"][0]
-            self.requests[self.user] = []
         else:
             self.user = None
 
@@ -210,8 +249,6 @@ class GUI(Ui_SignInWindow):
         QtWidgets.QApplication.processEvents()
         sleep(1)
 
-        if self.user not in self.requests:
-            self.requests[self.user] = []
         self.open_partition()
 
     def open_partition(self):
@@ -285,11 +322,11 @@ class GUI(Ui_SignInWindow):
             self.partition.listWidget.currentItemChanged.connect(
                 partial(self.fill_description, self.partition.textBrowser, 'officer'))
 
-        # fill the books table with books
+        self._book_page = 1
+        self._book_sort_by = "name"
+        self._book_sort_dir = "ASC"
+        self._wire_books_table()
         self.fill_table(self.partition.tableWidget_books, 'books', self.partition.comboBox_books)
-
-        self.partition.comboBox_books.currentIndexChanged.connect(
-            partial(self.fill_table, self.partition.tableWidget_books, 'books', self.partition.comboBox_books))
 
         partition_app.closeEvent = self.not_main_closeEvent
         self.set_logo(self.partition.label_logo, partition_app)
@@ -393,100 +430,234 @@ class GUI(Ui_SignInWindow):
         """
 
         if mode == "books":
-            table.setRowCount(0)
-            filter_by_index = {0: "Available", 1: "Borrowed"}
-            filter_state = filter_by_index.get(comboBox.currentIndex(), "Reserved")
-            visibility = action_visibility(filter_state)
-            if hasattr(self.partition, 'pushButton_reserve') and hasattr(self.partition, 'pushButton_borrow'):
-                self.partition.pushButton_reserve.setVisible(visibility["reserve"])
-                self.partition.pushButton_borrow.setVisible(visibility["borrow"])
-
-            users_by_id = {}
-            for role in ("costumer", "officer"):
-                for person in self.officers_costumers.get(role, []):
-                    if getattr(person, "user_id", None):
-                        users_by_id[person.user_id] = person
-            books = self.book_service.list_books(filter_state, users_by_id=users_by_id)
-
-            if books:
-                x = 0
-                while x < len(books):
-                    table.insertRow(x)
-                    table.setItem(x, 0, QtWidgets.QTableWidgetItem(books[x].name))
-                    table.setItem(x, 1, QtWidgets.QTableWidgetItem(books[x].author))
-                    table.setItem(x, 2, QtWidgets.QTableWidgetItem(filter_state))
-                    table.setItem(x, 3,
-                                  QtWidgets.QTableWidgetItem("Yes" if books[x].is_reserved else "No"))
-                    if filter_state == "Available":
-                        table.setItem(x, 4, QtWidgets.QTableWidgetItem("No"))
-                        table.setItem(x, 5, QtWidgets.QTableWidgetItem("---"))
-                        table.setItem(x, 6, QtWidgets.QTableWidgetItem("---"))
-                    elif filter_state == "Borrowed":
-                        table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
-                        table.setItem(x, 5,
-                                      QtWidgets.QTableWidgetItem(
-                                          books[x].borrowed_time.strftime("%Y/%m/%d") if books[x].borrowed_time else "---"))
-                        table.setItem(x, 6,
-                                      QtWidgets.QTableWidgetItem(
-                                          books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---"))
-                    else:
-                        if not books[x].borrowed.first_name:
-                            table.setItem(x, 4, QtWidgets.QTableWidgetItem("No"))
-                            table.setItem(x, 5, QtWidgets.QTableWidgetItem("---"))
-                            table.setItem(x, 6, QtWidgets.QTableWidgetItem("---"))
-                        else:
-                            table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
-                            table.setItem(x, 5, QtWidgets.QTableWidgetItem(
-                                books[x].borrowed_time.strftime("%Y/%m/%d") if books[x].borrowed_time else "---"))
-                            table.setItem(x, 6,
-                                          QtWidgets.QTableWidgetItem(
-                                              books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---"))
-                    x += 1
+            self._fill_books_table()
+            return
 
         elif mode == 'my_books':
             table.setRowCount(0)
-
-            borrowed_books = [book for book in self.user.borrowed_books.keys()]
-            returned_books = [book for book in self.user.returned_books.keys()]
-
+            loans = self.borrow_repo.list_by_user(self.user.user_id)
+            users_by_id = self._users_by_id()
             x = 0
-            if borrowed_books:  # fill the table first with borrowed books,
-                while x < len(borrowed_books):
-                    due = borrowed_books[x].return_time
-                    borrowed_at = borrowed_books[x].borrowed_time
-                    delay = Tools.find_delay(due, Datetime.now()) if due else 0
-                    bill = Tools.find_bill(delay)
-
-                    table.insertRow(x)
-                    table.setItem(x, 0, QtWidgets.QTableWidgetItem(borrowed_books[x].name))
-                    table.setItem(x, 1, QtWidgets.QTableWidgetItem("Borrowed"))
-                    table.setItem(x, 2,
-                                  QtWidgets.QTableWidgetItem(borrowed_at.strftime("%Y/%m/%d") if borrowed_at else "---"))
-                    table.setItem(x, 3, QtWidgets.QTableWidgetItem(due.strftime("%Y/%m/%d") if due else "---"))
-                    table.setItem(x, 4, QtWidgets.QTableWidgetItem(
-                        str(self.user.borrowed_books[borrowed_books[x]]['extension'])))
-                    table.setItem(x, 5, QtWidgets.QTableWidgetItem(str(delay)))
-                    table.setItem(x, 6, QtWidgets.QTableWidgetItem(str(bill)))
-                    x += 1
-
+            for loan in loans:
+                if loan.status not in ("borrowed", "overdue"):
+                    continue
+                book = self.book_service.get(loan.book_id, users_by_id=users_by_id)
+                if not book:
+                    continue
+                due = loan.return_time
+                borrowed_at = loan.borrowed_time
+                delay = find_delay(due, Datetime.now()) if due else 0
+                bill = find_bill(delay)
+                table.insertRow(x)
+                table.setItem(x, 0, QtWidgets.QTableWidgetItem(book.name))
+                table.setItem(x, 1, QtWidgets.QTableWidgetItem("Borrowed"))
+                table.setItem(x, 2, QtWidgets.QTableWidgetItem(borrowed_at.strftime("%Y/%m/%d") if borrowed_at else "---"))
+                table.setItem(x, 3, QtWidgets.QTableWidgetItem(due.strftime("%Y/%m/%d") if due else "---"))
+                table.setItem(x, 4, QtWidgets.QTableWidgetItem(str(loan.extension_days)))
+                table.setItem(x, 5, QtWidgets.QTableWidgetItem(str(delay)))
+                table.setItem(x, 6, QtWidgets.QTableWidgetItem(str(bill)))
+                x += 1
             y = 0
-            if returned_books:  # then fill the table with returned books,
-                while y < len(returned_books):
-                    delay = self.user.returned_books[returned_books[y]]['delay']
-                    bill = Tools.find_bill(delay)
+            for loan in loans:
+                if loan.status != "returned":
+                    continue
+                book = self.book_service.get(loan.book_id, users_by_id=users_by_id)
+                if not book:
+                    continue
+                delay = find_delay(loan.return_time, loan.actual_return_time)
+                bill = find_bill(delay)
+                table.insertRow(y + x)
+                table.setItem(y + x, 0, QtWidgets.QTableWidgetItem(book.name))
+                table.setItem(y + x, 1, QtWidgets.QTableWidgetItem("Returned"))
+                table.setItem(y + x, 2, QtWidgets.QTableWidgetItem(
+                    loan.borrowed_time.strftime("%Y/%m/%d") if loan.borrowed_time else "---"))
+                table.setItem(y + x, 3, QtWidgets.QTableWidgetItem(
+                    loan.actual_return_time.strftime("%Y/%m/%d") if loan.actual_return_time else "---"))
+                table.setItem(y + x, 4, QtWidgets.QTableWidgetItem(str(loan.extension_days)))
+                table.setItem(y + x, 5, QtWidgets.QTableWidgetItem(str(delay)))
+                table.setItem(y + x, 6, QtWidgets.QTableWidgetItem(str(bill)))
+                y += 1
 
-                    table.insertRow(y + x)
-                    table.setItem(y + x, 0, QtWidgets.QTableWidgetItem(returned_books[y].name))
-                    table.setItem(y + x, 1, QtWidgets.QTableWidgetItem("Returned"))
-                    table.setItem(y + x, 2, QtWidgets.QTableWidgetItem(
-                        self.user.returned_books[returned_books[y]]['borrowed_time'].strftime("%Y/%m/%d")))
-                    table.setItem(y + x, 3, QtWidgets.QTableWidgetItem(
-                        self.user.returned_books[returned_books[y]]['returned_time'].strftime("%Y/%m/%d")))
-                    table.setItem(y + x, 4, QtWidgets.QTableWidgetItem(
-                        str(self.user.returned_books[returned_books[y]]['extension'])))
-                    table.setItem(y + x, 5, QtWidgets.QTableWidgetItem(str(delay)))
-                    table.setItem(y + x, 6, QtWidgets.QTableWidgetItem(str(bill)))
-                    y += 1
+    def _wire_books_table(self):
+        partition = self.partition
+        table = partition.tableWidget_books
+        table.setSortingEnabled(False)
+        header = table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.sortIndicatorChanged.connect(self._on_books_sort)
+        partition.comboBox_books.currentIndexChanged.connect(self._on_books_filter_changed)
+        if hasattr(partition, "lineEdit_book_search"):
+            partition.lineEdit_book_search.returnPressed.connect(self._on_books_search)
+        if hasattr(partition, "pushButton_book_search"):
+            partition.pushButton_book_search.clicked.connect(self._on_books_search)
+        if hasattr(partition, "comboBox_page_size"):
+            partition.comboBox_page_size.currentIndexChanged.connect(self._on_books_filter_changed)
+        if hasattr(partition, "pushButton_book_prev"):
+            partition.pushButton_book_prev.clicked.connect(self._on_books_prev)
+        if hasattr(partition, "pushButton_book_next"):
+            partition.pushButton_book_next.clicked.connect(self._on_books_next)
+
+    def _books_filter_state(self):
+        combo = self.partition.comboBox_books
+        return {0: "Available", 1: "Borrowed"}.get(combo.currentIndex(), "Reserved")
+
+    def _books_page_size(self):
+        if not hasattr(self.partition, "comboBox_page_size"):
+            return 20
+        try:
+            return int(self.partition.comboBox_page_size.currentText())
+        except (TypeError, ValueError):
+            return 20
+
+    def _books_keyword(self):
+        if not hasattr(self.partition, "lineEdit_book_search"):
+            return ""
+        return self.partition.lineEdit_book_search.text()
+
+    def _on_books_filter_changed(self, *_args):
+        self._book_page = 1
+        self._fill_books_table()
+
+    def _on_books_search(self):
+        self._book_page = 1
+        self._fill_books_table()
+
+    def _on_books_prev(self):
+        self._book_page = max(1, int(self._book_page or 1) - 1)
+        self._fill_books_table()
+
+    def _on_books_next(self):
+        self._book_page = int(self._book_page or 1) + 1
+        self._fill_books_table()
+
+    def _on_books_sort(self, logical_index, order):
+        if self._filling_books:
+            return
+        self._book_sort_by = _BOOK_HEADER_SORT.get(logical_index, "name")
+        self._book_sort_dir = "DESC" if order == Qt.DescendingOrder else "ASC"
+        self._fill_books_table()
+
+    def _fill_books_table(self):
+        if self.partition is None or self._filling_books:
+            return
+        table = self.partition.tableWidget_books
+        filter_state = self._books_filter_state()
+        visibility = action_visibility(filter_state)
+        if hasattr(self.partition, "pushButton_reserve") and hasattr(self.partition, "pushButton_borrow"):
+            self.partition.pushButton_reserve.setVisible(visibility["reserve"])
+            self.partition.pushButton_borrow.setVisible(visibility["borrow"])
+
+        users_by_id = {}
+        for role in ("costumer", "officer"):
+            for person in self.officers_costumers.get(role, []):
+                if getattr(person, "user_id", None):
+                    users_by_id[person.user_id] = person
+
+        self._filling_books = True
+        try:
+            result = self.book_service.search_books(
+                keyword=self._books_keyword(),
+                filter_state=filter_state,
+                sort_by=self._book_sort_by,
+                sort_dir=self._book_sort_dir,
+                page=self._book_page,
+                page_size=self._books_page_size(),
+                users_by_id=users_by_id,
+            )
+            self._book_page = result["page"]
+            books = result["books"]
+            table.setSortingEnabled(False)
+            table.setRowCount(0)
+            x = 0
+            while x < len(books):
+                table.insertRow(x)
+                table.setItem(x, 0, QtWidgets.QTableWidgetItem(books[x].name))
+                table.setItem(x, 1, QtWidgets.QTableWidgetItem(books[x].author))
+                table.setItem(x, 2, QtWidgets.QTableWidgetItem(filter_state))
+                table.setItem(x, 3, QtWidgets.QTableWidgetItem("Yes" if books[x].is_reserved else "No"))
+                if filter_state == "Available":
+                    table.setItem(x, 4, QtWidgets.QTableWidgetItem("No"))
+                    table.setItem(x, 5, QtWidgets.QTableWidgetItem("---"))
+                    table.setItem(x, 6, QtWidgets.QTableWidgetItem("---"))
+                elif filter_state == "Borrowed":
+                    table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
+                    table.setItem(
+                        x, 5,
+                        QtWidgets.QTableWidgetItem(
+                            books[x].borrowed_time.strftime("%Y/%m/%d") if books[x].borrowed_time else "---",
+                        ),
+                    )
+                    table.setItem(
+                        x, 6,
+                        QtWidgets.QTableWidgetItem(
+                            books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---",
+                        ),
+                    )
+                else:
+                    if not books[x].borrowed.first_name:
+                        table.setItem(x, 4, QtWidgets.QTableWidgetItem("No"))
+                        table.setItem(x, 5, QtWidgets.QTableWidgetItem("---"))
+                        table.setItem(x, 6, QtWidgets.QTableWidgetItem("---"))
+                    else:
+                        table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
+                        table.setItem(
+                            x, 5,
+                            QtWidgets.QTableWidgetItem(
+                                books[x].borrowed_time.strftime("%Y/%m/%d") if books[x].borrowed_time else "---",
+                            ),
+                        )
+                        table.setItem(
+                            x, 6,
+                            QtWidgets.QTableWidgetItem(
+                                books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---",
+                            ),
+                        )
+                x += 1
+            if hasattr(self.partition, "label_book_page"):
+                self.partition.label_book_page.setText("%s / %s" % (result["page"], result["total_pages"]))
+            if hasattr(self.partition, "pushButton_book_prev"):
+                self.partition.pushButton_book_prev.setEnabled(result["page"] > 1)
+            if hasattr(self.partition, "pushButton_book_next"):
+                self.partition.pushButton_book_next.setEnabled(result["page"] < result["total_pages"])
+            header = table.horizontalHeader()
+            col = 0
+            for index, name in _BOOK_HEADER_SORT.items():
+                if name == self._book_sort_by:
+                    col = index
+                    break
+            order = Qt.DescendingOrder if self._book_sort_dir == "DESC" else Qt.AscendingOrder
+            header.blockSignals(True)
+            header.setSortIndicator(col, order)
+            header.blockSignals(False)
+        finally:
+            self._filling_books = False
+
+    def _is_audit_tab(self):
+        if self.partition is None or not hasattr(self.partition, "tab_Audit"):
+            return False
+        return self.partition.tabWidget.currentWidget() is self.partition.tab_Audit
+
+    def _refresh_audit_if_visible(self):
+        if self._is_audit_tab():
+            self.fill_audit_table()
+
+    def fill_audit_table(self):
+        if self.partition is None or not hasattr(self.partition, "tableWidget_audit"):
+            return
+        table = self.partition.tableWidget_audit
+        rows = self.audit_repo.list_recent(200)
+        table.setRowCount(0)
+        for index, row in enumerate(rows):
+            table.insertRow(index)
+            target = row.get("target_type") or ""
+            if row.get("target_id") is not None:
+                target = ("%s #%s" % (target, row["target_id"])).strip()
+            table.setItem(index, 0, QtWidgets.QTableWidgetItem(row.get("created_at") or ""))
+            table.setItem(index, 1, QtWidgets.QTableWidgetItem(row.get("username") or "—"))
+            table.setItem(index, 2, QtWidgets.QTableWidgetItem(row.get("action") or ""))
+            table.setItem(index, 3, QtWidgets.QTableWidgetItem(target))
+            table.setItem(index, 4, QtWidgets.QTableWidgetItem(row.get("detail") or ""))
 
     def fill_list(self, list_: QListWidget, mode: str) -> None:
         """
@@ -501,38 +672,41 @@ class GUI(Ui_SignInWindow):
         list_.clear()
 
         emoji = {"Not Accepted": "❔", "Accepted": "✅", "Denied": "❌"}  # emoji keeper
+        users_by_id = self._users_by_id()
 
         if mode == "costumer":
-            if self.requests:
-                items = [
-                    f'{i["request"].title()}) {i["book"].name} => {i["accepted"]}'
-                    for i in self.requests[self.user]]
-                for item_ in items:
-                    item = QListWidgetItem(item_)
-
-                    if item_.endswith("Not Accepted"):
-                        item.setForeground(Qt.blue)
-
-                    elif item_.endswith("Accepted"):
-                        item.setForeground(Qt.darkGreen)
-
-                    else:
-                        item.setForeground(Qt.red)
-
-                    list_.addItem(item)
+            for req in self.request_repo.list_by_user(self.user.user_id):
+                book = self.book_service.get(req.book_id, users_by_id=users_by_id)
+                label = _STATUS_LABEL.get(req.status, "Not Accepted")
+                rtype = _TYPE_LABEL.get(req.request_type, req.request_type.value.lower())
+                name = book.name if book else str(req.book_id)
+                item_ = f'{rtype.title()}) {name} => {label}'
+                item = QListWidgetItem(item_)
+                item.setData(Qt.UserRole, req.request_id)
+                if item_.endswith("Not Accepted"):
+                    item.setForeground(Qt.blue)
+                elif item_.endswith("Accepted"):
+                    item.setForeground(Qt.darkGreen)
+                else:
+                    item.setForeground(Qt.red)
+                list_.addItem(item)
 
         else:  # if mode is officer
             self.partition.pushButton_issue_receipt.hide()
             self.partition.pushButton_issue_bill.hide()
-
             self.list_ = []
-            if self.requests:
-                for user in self.requests.keys():
-                    items = [
-                        f'{emoji[i["accepted"]]} {i["request"].title()}) {i["book"].name} => {user.first_name} {user.last_name}'
-                        for i in self.requests[user]]
-                    list_.addItems(items)
-                    self.list_ += items
+            for req in self.request_repo.list_all():
+                book = self.book_service.get(req.book_id, users_by_id=users_by_id)
+                person = self.user_service.get(req.user_id)
+                label = _STATUS_LABEL.get(req.status, "Not Accepted")
+                rtype = _TYPE_LABEL.get(req.request_type, req.request_type.value.lower())
+                name = book.name if book else str(req.book_id)
+                uname = f'{person.first_name} {person.last_name}' if person else str(req.user_id)
+                item_ = f'{emoji[label]} {rtype.title()}) {name} => {uname}'
+                item = QListWidgetItem(item_)
+                item.setData(Qt.UserRole, req.request_id)
+                list_.addItem(item)
+                self.list_.append(item_)
 
     def fill_description(self, textBrowser: QTextBrowser, mode: str):
         """
@@ -543,49 +717,33 @@ class GUI(Ui_SignInWindow):
                 mode (str): The mode of being filled
         """
 
-        if mode == "costumer":
-            index = self.partition.listWidget.row(self.partition.listWidget.currentItem())
-            info = self.requests[self.user][index]
-
-            text = [f'{key.title()}: {info[key]}' for key in info.keys()]
-
-            textBrowser.setText("\n".join(text).replace("Book: ", "Book:\n").title())
-
-        else:  # if mode is officer
-            index = self.partition.listWidget.row(self.partition.listWidget.currentItem())
-
-            if index == -1:
-                return
-
-            x, user = 0, 0
-            for user_ in self.requests.keys():
-                x += len(self.requests[user_])
-                if x > index:
-                    user = user_
-                    break
-
-            index = -1
-            for i in self.list_:
-                if i.endswith(f'{user.first_name} {user.last_name}'):
-                    index += 1
-
-                if i == self.partition.listWidget.currentItem().text():
-                    break
-
-            info = self.requests[user][index]
-
-            # show or hide the 'issue receipt' or 'issue bill' buttons if the selected item is returned book or not.
-            if info['request'] == "return":
+        item = self.partition.listWidget.currentItem()
+        if item is None:
+            return
+        req = self.request_repo.get(item.data(Qt.UserRole))
+        if req is None:
+            return
+        users_by_id = self._users_by_id()
+        book = self.book_service.get(req.book_id, users_by_id=users_by_id)
+        person = self.user_service.get(req.user_id)
+        info = {
+            "request": _TYPE_LABEL.get(req.request_type, req.request_type.value.lower()),
+            "book": book,
+            "date": req.created_at,
+            "accepted": _STATUS_LABEL.get(req.status, "Not Accepted"),
+        }
+        if req.request_type == RequestType.RENEW:
+            info["extension"] = req.extra_days
+        if mode != "costumer":
+            if req.request_type == RequestType.RETURN:
                 self.partition.pushButton_issue_receipt.show()
                 self.partition.pushButton_issue_bill.show()
-
             else:
                 self.partition.pushButton_issue_receipt.hide()
                 self.partition.pushButton_issue_bill.hide()
-
-            text = [f'{key.title()}: {info[key]}' for key in info.keys()]
-
-            textBrowser.setText("\n".join(text).replace("Book: ", "Book:\n").title())
+            info["user"] = person
+        text = [f'{key.title()}: {info[key]}' for key in info.keys()]
+        textBrowser.setText("\n".join(text).replace("Book: ", "Book:\n").title())
 
     def costumer_request1(self, mode):
         """
@@ -595,11 +753,6 @@ class GUI(Ui_SignInWindow):
             Parameters:
                 mode (str): The mode of request
         """
-
-        # remove older request if requests is more than 10
-        if len(self.requests[self.user]) >= 10:
-            self.requests[self.user] = self.requests[self.user][1:]
-            self.set_error(self.partition.label_error_3, "Old requests removed !")
 
         index = self.partition.tableWidget_books.currentRow()
 
@@ -620,16 +773,16 @@ class GUI(Ui_SignInWindow):
                 self.set_error(self.partition.label_error, "You can't reserve any new book !")
 
             else:
+                self.borrow_service.submit_reserve(self.user, book)
                 self.set_error(self.partition.label_error, "Sent request to officer !", 'green')
-                self.request_adder(mode, book)  # add a request for officer to respond
 
         elif mode == 'borrow':
             if len(self.user.borrowed_books) == 3:
                 self.set_error(self.partition.label_error, "You can't borrow any new book !")
 
             else:
+                self.borrow_service.submit_borrow(self.user, book)
                 self.set_error(self.partition.label_error, "Sent request to officer !", 'green')
-                self.request_adder(mode, book)  # add a request for officer to respond
 
     def costumer_request2(self, mode):
         """
@@ -654,35 +807,12 @@ class GUI(Ui_SignInWindow):
                 self.set_error(self.partition.label_error_2, f"Extension days can't be equal/less than {current} !")
 
             else:
+                self.borrow_service.submit_renew(self.user, book, self.partition.spinBox.value())
                 self.set_error(self.partition.label_error_2, "Sent request to officer !", 'green')
-                self.request_adder(mode, book, extension=self.partition.spinBox.value())
 
         elif mode == 'return':
+            self.borrow_service.submit_return(self.user, book)
             self.set_error(self.partition.label_error_2, "Sent request to officer !", 'green')
-            self.request_adder(mode, book)
-
-    def request_adder(self, request: str, book: Lending, date: str = Datetime.now().strftime("%Y/%m/%d"),
-                      accepted: str = 'Not Accepted', extension: int = 0):
-        """
-            The function to add a new request to
-
-            Parameters:
-                request (str): The string value of the request
-                book (Lending): The book object request made for
-                date (str): The date of the request
-                accepted (str): The acceptation of the request (default is Not Accepted)
-                extension (int): The int value of extension days if it does
-        """
-
-        for req in self.requests[self.user]:
-            if req['request'] == request and req['book'] == book and req['accepted'] == accepted:
-                return
-        else:
-            if extension:
-                self.requests[self.user].append({"request": request, 'book': book, 'date': date, 'accepted': accepted,
-                                                 "extension": extension})
-            else:
-                self.requests[self.user].append({"request": request, 'book': book, 'date': date, 'accepted': accepted})
 
     def officer_confirm(self, accept: bool = True):
         """
@@ -692,111 +822,44 @@ class GUI(Ui_SignInWindow):
                 accept (bool): The boolean value of action officer performed on a request
         """
 
-        index = self.partition.listWidget.row(self.partition.listWidget.currentItem())
-
-        x, user = 0, ""  # find the user
-        for user_ in self.requests.keys():
-            x += len(self.requests[user_])
-            if x > index:
-                user = user_
-                break
-
-        # find the user's information
-        index = -1
-        for i in self.list_:
-            if i.endswith(f'{user.first_name} {user.last_name}'):
-                index += 1
-
-            if i == self.partition.listWidget.currentItem().text():
-                break
-
-        info = self.requests[user][index]
-
-        print(self.requests[user])
-        if self.requests[user][index]['accepted'] != "Not Accepted":  # don't handle the handled request
-            self.set_error(self.partition.label_error, "This request is already handled !")
+        item = self.partition.listWidget.currentItem()
+        if item is None:
             return
-
-
-        if isinstance(info['date'], Datetime): # find date
-            time = info['date']
-
-        else:
-            time = Datetime.strptime(info['date'], "%Y/%m/%d")
-
-
-
+        request_id = item.data(Qt.UserRole)
         self.set_error(self.partition.label_error)
-
-        if accept:  # if accept button clicked
-            if info['request'] == "borrow":
-                borrow = user.borrow_book(info['book'], time)
-                if borrow == CommandState.Done:
-                    self.requests[user][index]['accepted'] = "Accepted"
-                    self.set_error(self.partition.label_error, "User request accepted !", 'green')
-                    DB.persist_borrow(user, info['book'], time, info['book'].return_time)
-
-                elif borrow == CommandState.BorrowedBefore:
-                    self.set_error(self.partition.label_error, "User already borrowed this book !")
-
-                elif borrow == CommandState.MaximumBorrow:
-                    self.set_error(self.partition.label_error, "User's maximum borrowed books reached !")
-
-            elif info['request'] == "reserve":
-                reserve = user.reserve_book(info['book'], time)
-
-                if reserve == CommandState.Done:
-                    self.requests[user][index]['accepted'] = "Accepted"
-                    self.set_error(self.partition.label_error, "User request accepted !", 'green')
-                    DB.persist_reserve(user, info['book'], time)
-
-                elif reserve == CommandState.MaximumReserved:
-                    self.set_error(self.partition.label_error, "User's maximum reserved books reached !")
-
-            elif info['request'] == "extension":
-                try:
-                    extension = user.extension_book(info['book'], time, info['extension'])
-                except:
-                    self.set_error(self.partition.label_error, "User doesn't have the book !")
-                    return
-
-                if extension == CommandState.Done:
-                    self.requests[user][index]['accepted'] = "Accepted"
-                    self.set_error(self.partition.label_error, "User request accepted !", 'green')
-                    DB.persist_extension(user, info['book'], info['book'].return_time)
-
-                elif extension == CommandState.ExtensionLimitReached:
-                    self.set_error(self.partition.label_error, "User passed the limit of maximum extension days !")
-
-                elif extension == CommandState.NoMoreExtension:
-                    self.set_error(self.partition.label_error, "User already used the extension week !")
-
-            elif info['request'] == 'return':
-                try:
-                    return_ = user.return_book(info['book'], time, time)
-                except:
-                    self.set_error(self.partition.label_error, "User doesn't have the book !")
-                    return
-
-                if return_ == CommandState.Done:
-                    self.requests[user][index]['accepted'] = "Accepted"
-                    self.set_error(self.partition.label_error, "User request accepted ! Issue a receipt", 'green')
-                    DB.persist_return(user, info['book'], time)
-
+        try:
+            if accept:
+                extra = self.approval_service.confirm(request_id, self.user)
+                req = extra["request"]
+                bill = extra.get("bill") or 0
+                if req.request_type == RequestType.RETURN:
+                    if bill:
+                        self.set_error(
+                            self.partition.label_error,
+                            f"User request accepted ! Issue a bill for {bill} $",
+                            "green",
+                        )
+                    else:
+                        self.set_error(
+                            self.partition.label_error,
+                            "User request accepted ! Issue a receipt",
+                            "green",
+                        )
                 else:
-                    self.requests[user][index]['accepted'] = "Accepted"
-                    self.set_error(self.partition.label_error,
-                                   f"User request accepted ! Issue a bill for {return_[-1]} $", 'green')
-                    DB.persist_return(user, info['book'], time)
+                    self.set_error(self.partition.label_error, "User request accepted !", "green")
+            else:
+                self.approval_service.deny(request_id, self.user)
+                self.set_error(self.partition.label_error, "User request denied !", "green")
+        except RequestAlreadyHandled as exc:
+            self.set_error(self.partition.label_error, exc.message)
+        except ApprovalError as exc:
+            self.set_error(self.partition.label_error, exc.message)
 
-        else:  # if deny button clicked
-            self.requests[user][index]['accepted'] = "Denied"
-            self.set_error(self.partition.label_error, "User request denied !", 'green')
-
+        self._reload_catalog()
         if hasattr(self.partition, "tableWidget_books"):
             self.fill_table(self.partition.tableWidget_books, "books", self.partition.comboBox_books)
-
-        self.fill_list(self.partition.listWidget, 'officer')
+        self.fill_list(self.partition.listWidget, "officer")
+        self._refresh_audit_if_visible()
 
     def issue_rb(self, mode: str):
         """
@@ -806,42 +869,25 @@ class GUI(Ui_SignInWindow):
                 mode (str): The mode of being bill or receipt
         """
 
-        index = self.partition.listWidget.row(self.partition.listWidget.currentItem())
-        x, user = 0, 0
-        for user_ in self.requests.keys():
-            x += len(self.requests[user_])
-            if x > index:
-                user = user_
-                break
-
-        index = -1
-        for i in self.list_:
-            if i.endswith(f'{user.first_name} {user.last_name}'):
-                index += 1
-
-            if i == self.partition.listWidget.currentItem().text():
-                break
-
-        info = self.requests[user][index]
-
-        if info['accepted'] == "Accepted":
-            if mode == 'receipt':
-                receipt = Receipt(info['book'], user, user.returned_books[info['book']]['delay'])
-                self.set_error(self.partition.label_error, "Done !", 'green')
-                Tools.create_pdf(receipt)
-
-            elif mode == 'bill':
-                bill = 0
-                for order in user.orders:
-                    if 'bill' in order and order['book'] == info['book']:
-                        bill = order['bill']
-
-                bill = Bill(info['book'], user, user.returned_books[info['book']]['delay'], bill)
-                self.set_error(self.partition.label_error, "Done !", 'green')
-                Tools.create_pdf(bill)
-
-        else:
+        item = self.partition.listWidget.currentItem()
+        if item is None:
+            return
+        req = self.request_repo.get(item.data(Qt.UserRole))
+        if req is None or req.status != RequestStatus.ACCEPTED or req.request_type != RequestType.RETURN:
             self.set_error(self.partition.label_error, f"Only accepted returning can have a {mode} !")
+            return
+        users_by_id = self._users_by_id()
+        book = self.book_service.get(req.book_id, users_by_id=users_by_id)
+        user = self.user_service.get(req.user_id)
+        loans = [ln for ln in self.borrow_repo.list_by_user(req.user_id) if ln.book_id == req.book_id and ln.status == "returned"]
+        loan = loans[-1] if loans else None
+        delay = find_delay(loan.return_time, loan.actual_return_time) if loan else 0
+        bill = find_bill(delay)
+        if mode == "receipt":
+            Tools.create_pdf(Receipt(book, user, delay))
+        else:
+            Tools.create_pdf(Bill(book, user, delay, bill))
+        self.set_error(self.partition.label_error, "Done !", "green")
 
     def add_officer(self):
         """
@@ -874,6 +920,7 @@ class GUI(Ui_SignInWindow):
 
         self.set_error(self.partition.label_error_2, "Signed up the new user successfully !", 'green')
         self.empty_boxes("officer")
+        self._refresh_audit_if_visible()
 
     def SwitchTab(self, mode: str) -> None:
         """
@@ -883,26 +930,26 @@ class GUI(Ui_SignInWindow):
                 mode (str): The mode of being costumer or officer
         """
 
+        widget = self.partition.tabWidget.currentWidget()
         if mode == "costumer":
-            if self.partition.tabWidget.currentIndex() == 0:
+            if widget is getattr(self.partition, "tab_Books", None) or self.partition.tabWidget.currentIndex() == 0:
                 self.fill_table(self.partition.tableWidget_books, 'books', self.partition.comboBox_books)
 
-            elif self.partition.tabWidget.currentIndex() == 1:
+            elif widget is getattr(self.partition, "tab_My_Books", None) or self.partition.tabWidget.currentIndex() == 1:
                 self.fill_table(self.partition.tableWidget_my_books, 'my_books')
 
             elif self.partition.tabWidget.currentIndex() == 2:
                 self.fill_list(self.partition.listWidget, mode)
 
         else:
-            if 1:
-                if self.partition.tabWidget.currentIndex() == 0:
-                    self.fill_list(self.partition.listWidget, 'officer')
+            if widget is getattr(self.partition, "tab_Notification", None) or self.partition.tabWidget.currentIndex() == 0:
+                self.fill_list(self.partition.listWidget, 'officer')
 
-                elif self.partition.tabWidget.currentIndex() == 1:
-                    self.fill_table(self.partition.tableWidget_books, 'books', self.partition.comboBox_books)
+            elif widget is getattr(self.partition, "tab_Books_State", None):
+                self.fill_table(self.partition.tableWidget_books, 'books', self.partition.comboBox_books)
 
-                elif self.partition.tabWidget.currentIndex() == 2:
-                    pass
+            elif widget is getattr(self.partition, "tab_Audit", None):
+                self.fill_audit_table()
 
     def _connect_db(self):
         return get_connection()
@@ -939,10 +986,26 @@ class GUI(Ui_SignInWindow):
         self.officers_costumers[role].append(person)
         self.saveSqlite()
 
+    def _users_by_id(self):
+        by_id = {}
+        for role in ("costumer", "officer"):
+            for person in self.officers_costumers.get(role, []):
+                if getattr(person, "user_id", None):
+                    by_id[person.user_id] = person
+        return by_id
+
+    def _reload_catalog(self):
+        users_by_id = self._users_by_id()
+        self.books, books_by_id = self.book_repo.list_all(users_by_id)
+        restore_user_book_state(self.officers_costumers, books_by_id)
+        refresh_notifications()
+
     def saveSqlite(self):
         """将用户与图书（含状态、日期）同步写入数据库，不删除借阅/预约/消息记录。"""
         init_database()
-        DB.save_users_and_books(self.officers_costumers, self.books)
+        self.user_repo.save_users(self.officers_costumers)
+        for book in self.books:
+            self.book_repo.upsert(book)
 
     def readSqlite(self):
         """
@@ -955,14 +1018,14 @@ class GUI(Ui_SignInWindow):
             self._seed_default_accounts()
             self.officers_costumers, users_by_id = self.user_repo.list_all()
 
-        self.books, books_by_id = DB.load_books(users_by_id)
+        self.books, books_by_id = self.book_repo.list_all(users_by_id)
         if not self.books:
             self._seed_default_books()
-            DB.save_users_and_books(self.officers_costumers, self.books)
-            self.books, books_by_id = DB.load_books(users_by_id)
+            self.saveSqlite()
+            self.books, books_by_id = self.book_repo.list_all(users_by_id)
 
-        DB.restore_user_book_state(self.officers_costumers, books_by_id)
-        DB.refresh_notifications()
+        restore_user_book_state(self.officers_costumers, books_by_id)
+        refresh_notifications()
 
 
 def main():

@@ -12,6 +12,17 @@ SELECT book_id, name, author, state, borrowed_time, return_time,
        borrowed_user_id, reserved_user_id FROM Books
 """
 
+_SORT_COLUMNS = {
+    "name": "name COLLATE NOCASE",
+    "author": "author COLLATE NOCASE",
+    "state": "state",
+    "book_id": "book_id",
+    "reserved_user_id": "reserved_user_id",
+    "borrowed_user_id": "borrowed_user_id",
+    "borrowed_time": "borrowed_time",
+    "return_time": "return_time",
+}
+
 
 def _persist_state(state):
     if hasattr(state, "value"):
@@ -41,6 +52,8 @@ def _to_book(row, users_by_id):
         reserved=reserved or Person(),
     )
     book.book_id = book_id
+    book.borrowed_user_id = borrowed_user_id
+    book.reserved_user_id = reserved_user_id
     return book
 
 
@@ -70,42 +83,94 @@ class BookRepository:
         logger.info("loaded %s books", len(books))
         return books, by_id
 
+    def _filter_sql(self, state, keyword):
+        label = state.value if hasattr(state, "value") else str(state or "")
+        clauses = []
+        params = []
+        if label == "Borrowed":
+            clauses.append("state=?")
+            params.append(BookState.Borrowed.value)
+        elif label == "Reserved":
+            clauses.append("reserved_user_id IS NOT NULL")
+        elif label == "Available":
+            clauses.append("state=? AND reserved_user_id IS NULL")
+            params.append(BookState.Available.value)
+        text = (keyword or "").strip()
+        if text:
+            clauses.append("(name LIKE ? OR author LIKE ?)")
+            like = "%" + text + "%"
+            params.extend([like, like])
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params, label
+
     def list_by_state(self, state, users_by_id):
         # "Reserved" is a combo filter, not Books.state (see Book.is_reserved).
-        label = state.value if hasattr(state, "value") else str(state or "")
+        where, params, label = self._filter_sql(state, None)
         try:
             conn = self._conn()
-            if label == "Borrowed":
-                rows = conn.execute(
-                    _BOOK_SELECT + " WHERE state=?",
-                    (BookState.Borrowed.value,),
-                ).fetchall()
-            elif label == "Reserved":
-                rows = conn.execute(
-                    _BOOK_SELECT + " WHERE reserved_user_id IS NOT NULL",
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    _BOOK_SELECT + " WHERE state=? AND reserved_user_id IS NULL",
-                    (BookState.Available.value,),
-                ).fetchall()
+            rows = conn.execute(_BOOK_SELECT + where, params).fetchall()
             conn.close()
         except Exception:
             logger.exception("list_by_state failed state=%s", label)
             raise
         return [_to_book(row, users_by_id) for row in rows]
 
-    def get_by_id(self, book_id, users_by_id):
+    def count_matching(self, keyword=None, state=None):
+        where, params, label = self._filter_sql(state, keyword)
         try:
             conn = self._conn()
-            row = conn.execute(_BOOK_SELECT + " WHERE book_id=?", (book_id,)).fetchone()
+            total = conn.execute("SELECT COUNT(*) FROM Books" + where, params).fetchone()[0]
             conn.close()
+        except Exception:
+            logger.exception("count books failed state=%s keyword=%s", label, keyword)
+            raise
+        return int(total or 0)
+
+    def search(self, users_by_id, keyword=None, state=None, sort_by="name", sort_dir="ASC",
+               limit=20, offset=0):
+        where, params, label = self._filter_sql(state, keyword)
+        order_expr = _SORT_COLUMNS.get(sort_by) or _SORT_COLUMNS["name"]
+        direction = "DESC" if str(sort_dir).upper() == "DESC" else "ASC"
+        limit = max(0, int(limit or 0))
+        offset = max(0, int(offset or 0))
+        try:
+            conn = self._conn()
+            total = conn.execute("SELECT COUNT(*) FROM Books" + where, params).fetchone()[0]
+            rows = conn.execute(
+                _BOOK_SELECT + where + " ORDER BY %s %s, book_id ASC LIMIT ? OFFSET ?" % (
+                    order_expr, direction,
+                ),
+                list(params) + [limit, offset],
+            ).fetchall()
+            conn.close()
+        except Exception:
+            logger.exception("search books failed state=%s keyword=%s", label, keyword)
+            raise
+        logger.debug("search books state=%s total=%s page_offset=%s", label, total, offset)
+        return [_to_book(row, users_by_id) for row in rows], int(total or 0)
+
+    def get_by_id(self, book_id, users_by_id, conn=None):
+        close_after = False
+        if conn is None:
+            conn = self._conn()
+            close_after = True
+        try:
+            row = conn.execute(_BOOK_SELECT + " WHERE book_id=?", (book_id,)).fetchone()
         except Exception:
             logger.exception("get_by_id failed book_id=%s", book_id)
             raise
+        finally:
+            if close_after:
+                conn.close()
         if not row:
             return None
         return _to_book(row, users_by_id)
+
+    def set_reserved(self, book_id, reserved_user_id, conn):
+        conn.execute(
+            "UPDATE Books SET reserved_user_id=? WHERE book_id=?",
+            [reserved_user_id, book_id],
+        )
 
     def upsert(self, book, conn=None):
         close_after = False

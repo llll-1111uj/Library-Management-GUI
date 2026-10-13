@@ -1,7 +1,6 @@
-pyqt5-tools
-PyQt5
-fpdf
-pyinstaller
-pytest
-passlib[bcrypt]
-bcrypt<4.1
+PyQt5>=5.15.2,<5.16
+fpdf>=1.7.2,<2
+passlib[bcrypt]>=1.7.4,<1.8
+bcrypt>=3.2.2,<4.1
+pytest>=7.0.1,<9
+pyinstaller>=5.13.2,<7

@@ -78,3 +78,47 @@ class TestBookService:
         from Person import Person as P1
         from Code.Person import Person as P2
         assert P1 is P2
+
+    def test_search_keyword_and_state(self, book_env):
+        service, _repo, users_by_id, _db, _reader = book_env
+        hit = service.search_books("Available", FILTER_AVAILABLE, users_by_id=users_by_id)
+        miss = service.search_books("zzz-none", FILTER_AVAILABLE, users_by_id=users_by_id)
+        assert [b.name for b in hit["books"]] == ["Available Title"]
+        assert hit["total"] == 1
+        assert miss["books"] == []
+        assert miss["total"] == 0
+        assert miss["page"] == 1
+        assert miss["total_pages"] == 1
+
+    def test_search_sort_and_invalid_column(self, book_env):
+        service, repo, users_by_id, _db, _reader = book_env
+        extra = Book("Alpha Extra", "Zed", BookState.Available)
+        repo.upsert(extra)
+        result = service.search_books("", FILTER_AVAILABLE, sort_by="name", sort_dir="ASC",
+                                      users_by_id=users_by_id)
+        assert [b.name for b in result["books"]] == ["Alpha Extra", "Available Title"]
+        fallback = service.search_books("", FILTER_AVAILABLE, sort_by="drop table",
+                                        users_by_id=users_by_id)
+        assert [b.name for b in fallback["books"]] == ["Alpha Extra", "Available Title"]
+
+    def test_search_page_clamp(self, book_env):
+        service, repo, users_by_id, _db, _reader = book_env
+        for i in range(22):
+            repo.upsert(Book("Page Book %02d" % i, "Author A", BookState.Available))
+        page1 = service.search_books("Page Book", FILTER_AVAILABLE, page=1, page_size=20,
+                                     users_by_id=users_by_id)
+        assert page1["total"] == 22
+        assert page1["total_pages"] == 2
+        assert page1["page"] == 1
+        assert len(page1["books"]) == 20
+        last = service.search_books("Page Book", FILTER_AVAILABLE, page=99, page_size=20,
+                                    users_by_id=users_by_id)
+        assert last["page"] == 2
+        assert len(last["books"]) == 2
+        sized = service.search_books("Page Book", FILTER_AVAILABLE, page=1, page_size=50,
+                                     users_by_id=users_by_id)
+        assert sized["page_size"] == 50
+        assert len(sized["books"]) == 22
+        bad_size = service.search_books("Page Book", FILTER_AVAILABLE, page=1, page_size=7,
+                                        users_by_id=users_by_id)
+        assert bad_size["page_size"] == 20
