@@ -6,6 +6,10 @@ from datetime import datetime as Datetime
 from Person import Person
 from Lending import Lending
 from Tools import CommandState, BookState, Tools
+try:
+    from Password import hash_password, is_hashed
+except ImportError:
+    from Code.Password import hash_password, is_hashed
 
 class Costumer(Person):
     """
@@ -77,7 +81,13 @@ class Costumer(Person):
 
     @password.setter
     def password(self, password: str):
-        self._password = password
+        if not password:
+            self._password = ""
+            return
+        if is_hashed(password):
+            self._password = password
+        else:
+            self._password = hash_password(password)
 
     @property
     def email(self) -> str:

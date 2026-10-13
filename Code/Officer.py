@@ -5,6 +5,10 @@ from Tools import BookState
 from Lending import Lending
 from Person import Person
 from Receipt_Bill import Receipt, Bill
+try:
+    from Password import hash_password, is_hashed
+except ImportError:
+    from Code.Password import hash_password, is_hashed
 
 
 class Officer:
@@ -73,7 +77,13 @@ class Officer:
 
     @password.setter
     def password(self, password: str):
-        self._password = password
+        if not password:
+            self._password = ""
+            return
+        if is_hashed(password):
+            self._password = password
+        else:
+            self._password = hash_password(password)
 
     @property
     def email(self) -> str:

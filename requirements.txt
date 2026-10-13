@@ -3,3 +3,5 @@ PyQt5
 fpdf
 pyinstaller
 pytest
+passlib[bcrypt]
+bcrypt<4.1

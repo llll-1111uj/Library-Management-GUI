@@ -1,12 +1,15 @@
+import os
 import pytest
 from sys import path
 from datetime import datetime as Datetime
 
-path.insert(1, '../')
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+path.insert(1, _ROOT)
 from Code.Person import Person
 from Code.Book import Book
 from Code.Costumer import Costumer
 from Code.Tools import BookState, CommandState, Tools
+from Code.Password import is_hashed, verify_password
 
 
 class TestCostumer:
@@ -29,12 +32,14 @@ class TestCostumer:
 
     def test_credintial(self, setUp):
         assert self.costumer1.username == "zahrakarimi"
-        assert self.costumer1.password == "1234"
+        assert is_hashed(self.costumer1.password)
+        assert verify_password("1234", self.costumer1.password)
         assert self.costumer1.email == "zahrakarimi@gmail.com"
         assert self.costumer1.phone == "+989101234567"
 
         assert self.costumer2.username == "fatemeazizi"
-        assert self.costumer2.password == "4321"
+        assert is_hashed(self.costumer2.password)
+        assert verify_password("4321", self.costumer2.password)
         assert self.costumer2.email == "---"
         assert self.costumer2.phone == "---"
 

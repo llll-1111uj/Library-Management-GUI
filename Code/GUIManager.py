@@ -29,6 +29,7 @@ from Costumer import Costumer
 from Receipt_Bill import Receipt, Bill
 from Tools import BookState, Tools, CommandState
 import Database as DB
+from Password import verify_password, is_hashed
 
 from GUI.Signin_gui import Ui_SignInWindow
 from GUI.Signup_gui import Ui_SignUpWindow
@@ -125,7 +126,13 @@ class GUI(Ui_SignInWindow):
 
         self.set_logo(self.signup.label_logo, self.signup_app)
         self.signup_app.closeEvent = self.not_main_closeEvent
+
+        frame = self.signup_app.frameGeometry()
+        frame.moveCenter(QtWidgets.QApplication.desktop().availableGeometry().center())
+        self.signup_app.move(frame.topLeft())
+
         self.signup_app.show()
+        self.signup.lineEdit_username.setFocus()
         self.signup_app.exec_()
 
     def sign_up(self):
@@ -203,20 +210,25 @@ class GUI(Ui_SignInWindow):
 
         all = self.officers_costumers['costumer'] + self.officers_costumers['officer']
 
-        for entrance in all:  # if user entered username
-            if entrance.username == username_email and entrance.password == password:
-                self.set_error(self.label_error, "Signing in ...", 'green')
-                self.user = entrance
-                QtWidgets.QApplication.processEvents()
-                sleep(1)
-                break
-            # if user entered email
-            elif entrance.email == username_email and entrance.password == password:
-                self.set_error(self.label_error, "Signing in ...", 'green')
-                self.user = entrance
-                QtWidgets.QApplication.processEvents()
-                sleep(1)
-                break
+        for entrance in all:
+            identity_ok = (
+                entrance.username == username_email or entrance.email == username_email
+            )
+            if not identity_ok or not verify_password(password, entrance.password):
+                continue
+            # Login upgrade is a second-line fallback; startup _normalize_passwords is primary.
+            if not is_hashed(entrance.password):
+                entrance.password = password
+                role = "officer" if type(entrance).__name__ == "Officer" else "costumer"
+                conn = DB.get_connection()
+                DB.upsert_user(conn, entrance, role)
+                conn.commit()
+                conn.close()
+            self.set_error(self.label_error, "Signing in ...", 'green')
+            self.user = entrance
+            QtWidgets.QApplication.processEvents()
+            sleep(1)
+            break
         else:
             self.set_error(self.label_error, "Username/Email address or password incorrect !")
             return

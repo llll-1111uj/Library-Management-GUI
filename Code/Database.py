@@ -1,11 +1,19 @@
 """
 SQLite 初始化与业务同步。
 启动时自动建表（含主键、外键），借阅/归还/预约发生时实时更新 Books 与业务表。
-密码以明文存取，不做哈希。
+Users.password 只存 bcrypt 哈希。
+启动时 _normalize_passwords 是明文升级的兜底；
+登录时的明文升级是兜底的兜底（防止中途又写入明文）。
+正常跑完一次启动归一化后，登录分支的明文升级基本不会走到。
 """
 import os
 from datetime import datetime as Datetime, timedelta
 from sqlite3 import connect, Connection
+
+try:
+    from Password import hash_password, is_hashed
+except ImportError:
+    from Code.Password import hash_password, is_hashed
 
 _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.dirname(_CODE_DIR)
@@ -57,26 +65,6 @@ def _columns(cur, name: str):
     return [r[1] for r in cur.execute("PRAGMA table_info(%s)" % name)]
 
 
-_KNOWN_MD5 = {
-    "81dc9bdb52d04dc20036dbd8313ed055": "1234",  # 历史 md5("1234")
-}
-
-
-def _plain_password(username: str, password: str) -> str:
-    """历史数据若仍是 32 位 MD5，默认账号或已知哈希还原为明文。"""
-    if not password:
-        return ""
-    lowered = password.lower()
-    if lowered in _KNOWN_MD5:
-        return _KNOWN_MD5[lowered]
-    if len(password) == 32 and all(c in "0123456789abcdef" for c in lowered):
-        if username == "azarhajipour":
-            return "1234"
-        if username == "mahdihajipour":
-            return "4321"
-    return password
-
-
 # ---------- 建表 SQL（每张表字段均有中文注释） ----------
 
 SQL_CREATE_USERS = """
@@ -85,7 +73,7 @@ CREATE TABLE IF NOT EXISTS Users (
     first_name TEXT NOT NULL,                  -- 名
     last_name TEXT NOT NULL,                   -- 姓
     username TEXT NOT NULL UNIQUE,             -- 登录用户名
-    password TEXT NOT NULL,                    -- 明文密码（不做哈希）
+    password TEXT NOT NULL,                    -- bcrypt 哈希，不存明文
     email TEXT,                                -- 邮箱
     phone TEXT,                                -- 电话
     role TEXT NOT NULL CHECK(role IN ('costumer', 'officer')) -- 角色：读者/管理员
@@ -164,7 +152,7 @@ def _migrate_users(cur):
     for row in rows:
         data = dict(zip(names, row))
         username = data.get("username")
-        password = _plain_password(username, data.get("password"))
+        password = data.get("password") or ""
         cur.execute(
             """INSERT INTO Users(user_id, first_name, last_name, username, password, email, phone, role)
                VALUES(?,?,?,?,?,?,?,?)""",
@@ -183,10 +171,21 @@ def _migrate_users(cur):
 
 
 def _normalize_passwords(cur):
-    for user_id, username, password in cur.execute("SELECT user_id, username, password FROM Users").fetchall():
-        plain = _plain_password(username, password)
-        if plain != password:
-            cur.execute("UPDATE Users SET password=? WHERE user_id=?", (plain, user_id))
+    """启动兜底：把 Users 表中的遗留明文升级为 bcrypt。
+    不兼容历史 MD5：既非 bcrypt 又非用户记得的明文时跳过，需重建账号。
+    单条失败只记录日志，不中断启动。
+    """
+    rows = cur.execute("SELECT user_id, username, password FROM Users").fetchall()
+    for user_id, username, password in rows:
+        try:
+            if not password or is_hashed(password):
+                continue
+            hashed = hash_password(password)
+            if not hashed:
+                continue
+            cur.execute("UPDATE Users SET password=? WHERE user_id=?", (hashed, user_id))
+        except Exception as exc:
+            print("[password] upgrade failed user_id=%s username=%s: %s" % (user_id, username, exc))
 
 
 def _migrate_books(cur):
@@ -339,7 +338,6 @@ def load_users():
     result = {"costumer": [], "officer": []}
     by_id = {}
     for user_id, first_name, last_name, username, password, email, phone, role in rows:
-        password = _plain_password(username, password)
         if role == "officer":
             person = Officer(first_name, last_name, username, password, email or "", phone or "")
             result["officer"].append(person)
