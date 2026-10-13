@@ -1,3 +1,5 @@
+import sys
+
 class Person:
     """
        This is a class for representing a person.
@@ -14,3 +16,9 @@ class Person:
 
         self.last_name = None
         self.first_name = None
+
+
+# REFACTOR-TRANSITION: Person and Code.Person must be the same module (fixes test_Book).
+_mod = sys.modules[__name__]
+sys.modules["Person"] = _mod
+sys.modules["Code.Person"] = _mod

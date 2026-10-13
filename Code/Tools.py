@@ -4,7 +4,7 @@ from typing import Union
 from datetime import timedelta, datetime as Datetime
 
 from Receipt_Bill import Bill, Receipt
-
+from domain.book import BookState  # REFACTOR-TRANSITION: single BookState enum
 
 class CommandState(Enum):
     """
@@ -19,15 +19,6 @@ class CommandState(Enum):
     NoMoreExtension = "User already used the extension week !"
     ExtensionLimitReached = "User passed the limit of maximum extension days !"
     Bill = "User have a bill to pay !"
-
-
-class BookState(Enum):
-    """
-       Enum class for BookState.
-    """
-
-    Available = "Available"
-    Borrowed = "Borrowed"
 
 
 class Tools:

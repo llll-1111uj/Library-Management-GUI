@@ -1,5 +1,5 @@
+import logging
 import os
-from re import search
 from time import sleep
 from typing import Union
 from sys import path, argv, exit
@@ -24,12 +24,18 @@ from PyQt5.QtWidgets import QLabel, QTableWidget, QComboBox, QListWidget, QTextB
 from Lending import Lending
 from Book import Book
 from Person import Person
-from Officer import Officer
-from Costumer import Costumer
 from Receipt_Bill import Receipt, Bill
 from Tools import BookState, Tools, CommandState
+from Officer import Officer  # noqa: F401  # REFACTOR-TRANSITION: keep Officer class; do not replace with User.
+# TODO(A3): GUIManager still uses Database for persist_*/saveSqlite/readSqlite book load.
+# REFACTOR-TRANSITION: book/loan persistence still goes through deprecated Database.py.
 import Database as DB
-from Password import verify_password, is_hashed
+from domain.exceptions import AuthError
+from repository.connection import get_connection, init_database
+from repository.book_repository import BookRepository
+from repository.user_repository import UserRepository
+from service.auth_service import AuthService
+from service.book_service import BookService, action_visibility
 
 from GUI.Signin_gui import Ui_SignInWindow
 from GUI.Signup_gui import Ui_SignUpWindow
@@ -64,6 +70,10 @@ class GUI(Ui_SignInWindow):
         self.partition = None
         self.user = None
         self.requests = {}
+        self.user_repo = UserRepository()
+        self.auth = AuthService(self.user_repo)
+        self.book_repo = BookRepository()
+        self.book_service = BookService(self.book_repo, self.user_repo)
 
     def setupUi(self, MainWindow):
         """CMS_UI parent class function"""
@@ -145,44 +155,27 @@ class GUI(Ui_SignInWindow):
 
         self.set_error(self.signup.label_error, "")
 
-        regex = '^[A-Za-z0-9._%+-]+[@][A-Za-z0-9.-]+[A-Z|a-z]{2,3}$'
-        all = [i.username for i in list(self.officers_costumers['costumer'] + self.officers_costumers['officer'])]
-
-        username = self.signup.lineEdit_username.text().lower()
-        password = self.signup.lineEdit_password.text()
-        password_2 = self.signup.lineEdit_password_2.text()
-        fullname = self.signup.lineEdit_full_name.text()
-        email = self.signup.lineEdit_email.text()
-        phone = self.signup.lineEdit_phone.text()
-
-        if not username:
-            self.set_error(self.signup.label_error, "Username is empty !")
+        taken = [i.username for i in list(self.officers_costumers['costumer'] + self.officers_costumers['officer'])]
+        try:
+            person = self.auth.register_costumer(
+                self.signup.lineEdit_username.text(),
+                self.signup.lineEdit_password.text(),
+                self.signup.lineEdit_password_2.text(),
+                self.signup.lineEdit_full_name.text(),
+                self.signup.lineEdit_email.text(),
+                self.signup.lineEdit_phone.text(),
+                taken,
+            )
+        except AuthError as exc:
+            self.set_error(self.signup.label_error, exc.message)
             return
-
-        elif username in all:
+        except Exception:
+            logging.getLogger(__name__).exception("sign_up failed")
             self.set_error(self.signup.label_error, "Username is already used !")
             return
 
-        elif not password or not password_2:
-            self.set_error(self.signup.label_error, "Password is empty !")
-            return
-
-        elif not fullname:
-            self.set_error(self.signup.label_error, "Name is empty !")
-            return
-
-        elif password != password_2:
-            self.set_error(self.signup.label_error, "Passwords are not matching !")
-            return
-
-        elif email and not search(regex, email):
-            self.set_error(self.signup.label_error, "Entered email is not valid !")
-            return
-
-        first_name = fullname.split(" ")[0]
-        last_name = fullname.replace(first_name, "", 1)
-        self.officers_costumers["costumer"].append(Costumer(first_name, last_name, username, password, email, phone))
-        self.saveSqlite()
+        # REFACTOR-TRANSITION: AuthService already upserted; saveSqlite writes the snapshot again.
+        self.commit_registered_user(person, "costumer")
 
         self.set_error(self.signup.label_error, "Signing up ...", 'green')
         QtWidgets.QApplication.processEvents()
@@ -197,41 +190,25 @@ class GUI(Ui_SignInWindow):
 
         self.set_error(self.label_error, "")
 
-        username_email = self.lineEdit_username_email.text().lower()
-        password = self.lineEdit_password.text()
-
-        if not username_email:
-            self.set_error(self.label_error, "Username/Email address is empty !")
-            return
-
-        elif not self.lineEdit_password.text():
-            self.set_error(self.label_error, "Password is empty !")
-            return
-
-        all = self.officers_costumers['costumer'] + self.officers_costumers['officer']
-
-        for entrance in all:
-            identity_ok = (
-                entrance.username == username_email or entrance.email == username_email
+        users = self.officers_costumers['costumer'] + self.officers_costumers['officer']
+        try:
+            entrance = self.auth.login(
+                self.lineEdit_username_email.text(),
+                self.lineEdit_password.text(),
+                users,
             )
-            if not identity_ok or not verify_password(password, entrance.password):
-                continue
-            # Login upgrade is a second-line fallback; startup _normalize_passwords is primary.
-            if not is_hashed(entrance.password):
-                entrance.password = password
-                role = "officer" if type(entrance).__name__ == "Officer" else "costumer"
-                conn = DB.get_connection()
-                DB.upsert_user(conn, entrance, role)
-                conn.commit()
-                conn.close()
-            self.set_error(self.label_error, "Signing in ...", 'green')
-            self.user = entrance
-            QtWidgets.QApplication.processEvents()
-            sleep(1)
-            break
-        else:
+        except AuthError as exc:
+            self.set_error(self.label_error, exc.message)
+            return
+        except Exception:
+            logging.getLogger(__name__).exception("sign_in failed")
             self.set_error(self.label_error, "Username/Email address or password incorrect !")
             return
+
+        self.set_error(self.label_error, "Signing in ...", 'green')
+        self.user = entrance
+        QtWidgets.QApplication.processEvents()
+        sleep(1)
 
         if self.user not in self.requests:
             self.requests[self.user] = []
@@ -249,6 +226,8 @@ class GUI(Ui_SignInWindow):
 
         partition_app = QtWidgets.QDialog()
 
+        # TODO: A4 阶段统一 User 类型。
+        # Keep memory-list membership (not isinstance/role) to choose costumer vs officer UI.
         if self.user in self.officers_costumers['costumer']:  # if it's a costumer
             self.partition = Ui_CostumerWindow()
             self.partition.setupUi(partition_app)
@@ -415,45 +394,34 @@ class GUI(Ui_SignInWindow):
 
         if mode == "books":
             table.setRowCount(0)
+            filter_by_index = {0: "Available", 1: "Borrowed"}
+            filter_state = filter_by_index.get(comboBox.currentIndex(), "Reserved")
+            visibility = action_visibility(filter_state)
+            if hasattr(self.partition, 'pushButton_reserve') and hasattr(self.partition, 'pushButton_borrow'):
+                self.partition.pushButton_reserve.setVisible(visibility["reserve"])
+                self.partition.pushButton_borrow.setVisible(visibility["borrow"])
 
-            if comboBox.currentIndex() == 0:  # if combobox is selected the 'Available'
-                if hasattr(self.partition, 'pushButton_reserve') and hasattr(self.partition, 'pushButton_borrow'):
-                    self.partition.pushButton_reserve.show()
-                    self.partition.pushButton_borrow.show()
+            users_by_id = {}
+            for role in ("costumer", "officer"):
+                for person in self.officers_costumers.get(role, []):
+                    if getattr(person, "user_id", None):
+                        users_by_id[person.user_id] = person
+            books = self.book_service.list_books(filter_state, users_by_id=users_by_id)
 
-                books = [book for book in self.books if
-                         book.state == BookState.Available and not book.reserved.first_name]
-
-                if books:
-                    x = 0
-                    while x < len(books):
-                        table.insertRow(x)
-                        table.setItem(x, 0, QtWidgets.QTableWidgetItem(books[x].name))
-                        table.setItem(x, 1, QtWidgets.QTableWidgetItem(books[x].author))
-                        table.setItem(x, 2, QtWidgets.QTableWidgetItem("Available"))
-                        table.setItem(x, 3,
-                                      QtWidgets.QTableWidgetItem("Yes" if books[x].reserved.first_name else "No"))
+            if books:
+                x = 0
+                while x < len(books):
+                    table.insertRow(x)
+                    table.setItem(x, 0, QtWidgets.QTableWidgetItem(books[x].name))
+                    table.setItem(x, 1, QtWidgets.QTableWidgetItem(books[x].author))
+                    table.setItem(x, 2, QtWidgets.QTableWidgetItem(filter_state))
+                    table.setItem(x, 3,
+                                  QtWidgets.QTableWidgetItem("Yes" if books[x].is_reserved else "No"))
+                    if filter_state == "Available":
                         table.setItem(x, 4, QtWidgets.QTableWidgetItem("No"))
                         table.setItem(x, 5, QtWidgets.QTableWidgetItem("---"))
                         table.setItem(x, 6, QtWidgets.QTableWidgetItem("---"))
-                        x += 1
-
-            elif comboBox.currentIndex() == 1:  # if combobox is selected the 'Borrowed'
-                if hasattr(self.partition, 'pushButton_reserve') and hasattr(self.partition, 'pushButton_borrow'):
-                    self.partition.pushButton_reserve.show()
-                    self.partition.pushButton_borrow.hide()
-
-                books = [book for book in self.books if book.state == BookState.Borrowed]
-
-                if books:
-                    x = 0
-                    while x < len(books):
-                        table.insertRow(x)
-                        table.setItem(x, 0, QtWidgets.QTableWidgetItem(books[x].name))
-                        table.setItem(x, 1, QtWidgets.QTableWidgetItem(books[x].author))
-                        table.setItem(x, 2, QtWidgets.QTableWidgetItem("Borrowed"))
-                        table.setItem(x, 3,
-                                      QtWidgets.QTableWidgetItem("Yes" if books[x].reserved.first_name else "No"))
+                    elif filter_state == "Borrowed":
                         table.setItem(x, 4, QtWidgets.QTableWidgetItem("Yes"))
                         table.setItem(x, 5,
                                       QtWidgets.QTableWidgetItem(
@@ -461,24 +429,7 @@ class GUI(Ui_SignInWindow):
                         table.setItem(x, 6,
                                       QtWidgets.QTableWidgetItem(
                                           books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---"))
-                        x += 1
-
-            else:  # if combobox is selected the 'Reserved'
-                if hasattr(self.partition, 'pushButton_reserve') and hasattr(self.partition, 'pushButton_borrow'):
-                    self.partition.pushButton_reserve.hide()
-                    self.partition.pushButton_borrow.hide()
-
-                books = [book for book in self.books if book.reserved.first_name]
-
-                if books:
-                    x = 0
-                    while x < len(books):
-                        table.insertRow(x)
-                        table.setItem(x, 0, QtWidgets.QTableWidgetItem(books[x].name))
-                        table.setItem(x, 1, QtWidgets.QTableWidgetItem(books[x].author))
-                        table.setItem(x, 2, QtWidgets.QTableWidgetItem("Reserved"))
-                        table.setItem(x, 3,
-                                      QtWidgets.QTableWidgetItem("Yes" if books[x].reserved.first_name else "No"))
+                    else:
                         if not books[x].borrowed.first_name:
                             table.setItem(x, 4, QtWidgets.QTableWidgetItem("No"))
                             table.setItem(x, 5, QtWidgets.QTableWidgetItem("---"))
@@ -490,8 +441,7 @@ class GUI(Ui_SignInWindow):
                             table.setItem(x, 6,
                                           QtWidgets.QTableWidgetItem(
                                               books[x].return_time.strftime("%Y/%m/%d") if books[x].return_time else "---"))
-
-                        x += 1
+                    x += 1
 
         elif mode == 'my_books':
             table.setRowCount(0)
@@ -900,44 +850,27 @@ class GUI(Ui_SignInWindow):
 
         self.set_error(self.partition.label_error_2, "")
 
-        regex = '^[A-Za-z0-9._%+-]+[@][A-Za-z0-9.-]+[A-Z|a-z]{2,3}$'
-        all = [i.username for i in list(self.officers_costumers['costumer'] + self.officers_costumers['officer'])]
-
-        username = self.partition.lineEdit_username.text().lower()
-        password = self.partition.lineEdit_password.text()
-        password_2 = self.partition.lineEdit_password_2.text()
-        fullname = self.partition.lineEdit_full_name.text()
-        email = self.partition.lineEdit_email.text()
-        phone = self.partition.lineEdit_phone.text()
-
-        if not username:
-            self.set_error(self.partition.label_error_2, "Username is empty !")
+        taken = [i.username for i in list(self.officers_costumers['costumer'] + self.officers_costumers['officer'])]
+        try:
+            person = self.auth.register_officer(
+                self.partition.lineEdit_username.text(),
+                self.partition.lineEdit_password.text(),
+                self.partition.lineEdit_password_2.text(),
+                self.partition.lineEdit_full_name.text(),
+                self.partition.lineEdit_email.text(),
+                self.partition.lineEdit_phone.text(),
+                taken,
+            )
+        except AuthError as exc:
+            self.set_error(self.partition.label_error_2, exc.message)
             return
-
-        elif username in all:
+        except Exception:
+            logging.getLogger(__name__).exception("add_officer failed")
             self.set_error(self.partition.label_error_2, "Username is already used !")
             return
 
-        elif not password or not password_2:
-            self.set_error(self.partition.label_error_2, "Password is empty !")
-            return
-
-        elif not fullname:
-            self.set_error(self.partition.label_error_2, "Name is empty !")
-            return
-
-        elif password != password_2:
-            self.set_error(self.partition.label_error_2, "Passwords are not matching !")
-            return
-
-        elif email and not search(regex, email):
-            self.set_error(self.partition.label_error_2, "Entered email is not valid !")
-            return
-
-        first_name = fullname.split(" ")[0]
-        last_name = fullname.replace(first_name, "", 1)
-        self.officers_costumers["officer"].append(Officer(first_name, last_name, username, password, email, phone))
-        self.saveSqlite()
+        # REFACTOR-TRANSITION: AuthService already upserted; saveSqlite writes the snapshot again.
+        self.commit_registered_user(person, "officer")
 
         self.set_error(self.partition.label_error_2, "Signed up the new user successfully !", 'green')
         self.empty_boxes("officer")
@@ -972,25 +905,24 @@ class GUI(Ui_SignInWindow):
                     pass
 
     def _connect_db(self):
-        return DB.get_connection()
+        return get_connection()
 
     def ensure_tables(self, conn=None):
         """启动时创建 Users/Books/reserve/borrow_record/message_notify。"""
         close_after = False
         if conn is None:
-            conn = DB.init_database()
+            conn = init_database()
             close_after = True
         else:
-            DB.init_database()
+            init_database()
         if close_after:
             conn.close()
 
     def _seed_default_accounts(self):
         """Create built-in reader and officer accounts when the Users table is empty."""
-        self.officers_costumers["costumer"].append(
-            Costumer("Azar", "Hajipuor", "azarhajipour", "1234", "azarhajipour@Gmail.Com", "09111234567"))
-        self.officers_costumers["officer"].append(
-            Officer("Mahdi", "Hajipuor", "mahdihajipour", "4321", "mahdihajipour@gmail.com", "09117654321"))
+        seeded = self.auth.seed_defaults()
+        self.officers_costumers["costumer"].extend(seeded["costumer"])
+        self.officers_costumers["officer"].extend(seeded["officer"])
 
     def _seed_default_books(self):
         self.add_book("Me Before you", "Jojo Moyes")
@@ -1002,22 +934,26 @@ class GUI(Ui_SignInWindow):
         self.add_book("Paris 5", "Jojo Moyes")
         self.add_book("Paris 6", "Jojo Moyes")
 
+    def commit_registered_user(self, person, role):
+        # REFACTOR-TRANSITION: AuthService.upsert is write #1; saveSqlite snapshot is write #2.
+        self.officers_costumers[role].append(person)
+        self.saveSqlite()
+
     def saveSqlite(self):
         """将用户与图书（含状态、日期）同步写入数据库，不删除借阅/预约/消息记录。"""
-        DB.init_database()
+        init_database()
         DB.save_users_and_books(self.officers_costumers, self.books)
 
     def readSqlite(self):
         """
             启动时建表、加载用户和图书，并刷新逾期/预约到期消息。
         """
-        DB.init_database()
-        self.officers_costumers, users_by_id = DB.load_users()
+        init_database()
+        self.officers_costumers, users_by_id = self.user_repo.list_all()
         if not users_by_id:
             self.officers_costumers = {"costumer": [], "officer": []}
             self._seed_default_accounts()
-            DB.save_users_and_books(self.officers_costumers, [])
-            self.officers_costumers, users_by_id = DB.load_users()
+            self.officers_costumers, users_by_id = self.user_repo.list_all()
 
         self.books, books_by_id = DB.load_books(users_by_id)
         if not self.books:
@@ -1031,6 +967,10 @@ class GUI(Ui_SignInWindow):
 
 def main():
     """Application entry: start sign-in window with login/register wired up."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     global MainWindow
 
     app = QtWidgets.QApplication(argv)

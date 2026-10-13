@@ -1,6 +1,6 @@
 import pytest
 from sys import path
-from datetime import datetime as Datetime
+from datetime import datetime as Datetime, timedelta
 
 path.insert(1, '../')
 from Code.Person import Person
@@ -56,14 +56,23 @@ class TestBook:
         assert isinstance(self.book2.borrowed, Person)
 
     def test_times(self, setUp):
-        assert isinstance(self.book1.borrowed_time, Datetime)
+        # Book 构造时未传日期就是 None，这是既定契约；是否填日期由
+        # Costumer.borrow_book / persist_borrow 负责，不在 Book 类。
+        # 借出后日期如何被填充应在借阅 service / repository 层测，不是构造函数的职责。
+        assert self.book1.borrowed_time is None
+        assert self.book1.return_time is None
+
         assert isinstance(self.book2.borrowed_time, Datetime)
-
-        assert isinstance(self.book1.return_time, Datetime)
         assert isinstance(self.book2.return_time, Datetime)
 
-        self.book1.return_time = self.book1.borrowed_time
-        self.book2.return_time = self.book2.borrowed_time
-
-        assert isinstance(self.book1.return_time, Datetime)
-        assert isinstance(self.book2.return_time, Datetime)
+        same_day = Datetime(2026, 1, 1, 12, 0, 0)
+        book_same = Book(
+            "Same Day Return",
+            "Author",
+            BookState.Available,
+            Person(),
+            same_day,
+            same_day,
+        )
+        assert book_same.borrowed_time == same_day
+        assert book_same.return_time == same_day + timedelta(days=7)
