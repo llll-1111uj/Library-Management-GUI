@@ -16,6 +16,7 @@ else:
 DB_PATH = os.path.join(_ROOT_DIR, "Database", "Database.db")
 
 DT_FMT = "%Y-%m-%d %H:%M:%S"
+"""月日补零，同一种格式下字符串排序和真实时间顺序一致"""
 RESERVE_EXPIRE_DAYS = 3
 
 
